@@ -182,9 +182,9 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates", authed(func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
 		kind := str(b, "kind")
-		if kind != "login" && kind != "invite" {
+		if kind != "login" && kind != "invite" && kind != "link_email" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "kind must be login or invite"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "unknown template kind"})
 			return
 		}
 		s.templates[kind] = stubTemplate{Kind: kind, Subject: str(b, "subject"), Body: str(b, "body"), HTML: str(b, "html")}

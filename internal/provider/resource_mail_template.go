@@ -43,8 +43,8 @@ func (r *mailTemplateResource) Schema(_ context.Context, _ resource.SchemaReques
 			"id": schema.StringAttribute{Computed: true, Description: "The template kind."},
 			"kind": schema.StringAttribute{
 				Required:      true,
-				Description:   "Which email this template dresses: login or invite.",
-				Validators:    []validator.String{stringvalidator.OneOf("login", "invite")},
+				Description:   "Which email this template dresses: login, invite or link_email.",
+				Validators:    []validator.String{stringvalidator.OneOf("login", "invite", "link_email")},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"subject": schema.StringAttribute{Required: true, Description: "Subject line."},
