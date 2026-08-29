@@ -72,6 +72,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_mail_template` | Per-org login/invite email copy (plaintext + optional HTML part) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
+| `latchkey_api_key` | A tenant API key — secret (`lk_live_`) or browser/publishable (`lk_pk_live_`, `browser = true` + `allowed_origins`). Immutable: any change replaces the key, which is rotation; the plaintext lands once in the sensitive `key` attribute | Revokes the key |
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).

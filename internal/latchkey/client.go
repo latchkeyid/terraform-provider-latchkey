@@ -390,3 +390,60 @@ func (c *Client) RevokeGrant(ctx context.Context, email, namespace string) error
 		"email": email, "namespace": namespace,
 	}, nil)
 }
+
+// ---- tenant API keys ----
+
+// TenantKey is one ledger row — the plaintext never appears here; it
+// exists only in the CreateTenantKey response (show-once, hash at rest).
+type TenantKey struct {
+	Prefix         string   `json:"prefix"`
+	Name           string   `json:"name"`
+	Scopes         []string `json:"scopes"`
+	Browser        bool     `json:"browser"`
+	AllowedOrigins []string `json:"allowed_origins"`
+	Revoked        bool     `json:"revoked"`
+}
+
+// CreateTenantKey mints a key under a tenant. Browser (publishable)
+// keys carry the origin allowlist and mint lk_pk_* prefixes; the
+// returned plaintext is the only copy that will ever exist.
+func (c *Client) CreateTenantKey(ctx context.Context, tenant, name string, scopes []string, browser bool, allowedOrigins []string) (key, prefix string, err error) {
+	body := map[string]any{"name": name}
+	if len(scopes) > 0 {
+		body["scopes"] = scopes
+	}
+	if browser {
+		body["browser"] = true
+	}
+	// sent whenever configured — origins on a secret key must reach the
+	// server so its refusal surfaces instead of a silent omission
+	if len(allowedOrigins) > 0 {
+		body["allowed_origins"] = allowedOrigins
+	}
+	var out struct {
+		Key    string `json:"key"`
+		Prefix string `json:"prefix"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(tenant)+"/keys", body, &out); err != nil {
+		return "", "", err
+	}
+	return out.Key, out.Prefix, nil
+}
+
+func (c *Client) TenantKeys(ctx context.Context, tenant string) ([]TenantKey, error) {
+	var out struct {
+		Items []TenantKey `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/tenants/"+url.PathEscape(tenant)+"/keys", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// RevokeTenantKey revokes by display prefix — the server revokes every
+// key matching it (prefix collisions revoke together; safe direction).
+func (c *Client) RevokeTenantKey(ctx context.Context, tenant, prefix string) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(tenant)+"/keys/revoke", map[string]any{
+		"prefix": prefix,
+	}, nil)
+}

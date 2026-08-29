@@ -2,11 +2,13 @@ package provider
 
 import (
 	"os"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 )
 
 // Acceptance tests drive the real terraform CLI against the stub org API
@@ -195,6 +197,65 @@ func TestAccOrgData(t *testing.T) {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttrSet("data.latchkey_org.this", "slug"),
 					resource.TestCheckResourceAttrSet("data.latchkey_org.this", "display_name"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccApiKey(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_api_key" "backend" {
+  tenant = "shop"
+  name   = "ci deploy key"
+  scopes = ["properties:read"]
+}
+
+resource "latchkey_api_key" "storefront" {
+  tenant          = "shop"
+  name            = "storefront"
+  browser         = true
+  allowed_origins = ["https://app.acme.test", "https://*.acme.test"]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttrSet("latchkey_api_key.backend", "id"),
+					resource.TestMatchResourceAttr("latchkey_api_key.backend", "key", regexp.MustCompile(`^lk_live_`)),
+					resource.TestMatchResourceAttr("latchkey_api_key.storefront", "key", regexp.MustCompile(`^lk_pk_live_`)),
+					resource.TestCheckResourceAttr("latchkey_api_key.storefront", "browser", "true"),
+					resource.TestCheckResourceAttr("latchkey_api_key.storefront", "allowed_origins.0", "https://app.acme.test"),
+				),
+			},
+			{
+				// a changed origin list REPLACES the key — replacement is
+				// rotation; the plan itself must say so, and the untouched
+				// sibling must stay put
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("latchkey_api_key.storefront", plancheck.ResourceActionReplace),
+						plancheck.ExpectResourceAction("latchkey_api_key.backend", plancheck.ResourceActionNoop),
+					},
+				},
+				Config: `
+resource "latchkey_api_key" "backend" {
+  tenant = "shop"
+  name   = "ci deploy key"
+  scopes = ["properties:read"]
+}
+
+resource "latchkey_api_key" "storefront" {
+  tenant          = "shop"
+  name            = "storefront"
+  browser         = true
+  allowed_origins = ["https://app.acme.test"]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestMatchResourceAttr("latchkey_api_key.storefront", "key", regexp.MustCompile(`^lk_pk_live_`)),
+					resource.TestCheckResourceAttr("latchkey_api_key.storefront", "allowed_origins.#", "1"),
 				),
 			},
 		},
