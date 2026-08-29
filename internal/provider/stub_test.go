@@ -36,6 +36,15 @@ type stubTemplate struct {
 	HTML    string `json:"html"`
 }
 
+type stubKey struct {
+	Prefix         string   `json:"prefix"`
+	Name           string   `json:"name"`
+	Scopes         []string `json:"scopes"`
+	Browser        bool     `json:"browser"`
+	AllowedOrigins []string `json:"allowed_origins"`
+	Revoked        bool     `json:"revoked"`
+}
+
 type stubState struct {
 	mu        sync.Mutex
 	clients   map[string]*stubClient
@@ -44,6 +53,8 @@ type stubState struct {
 	members   map[string]string // email → role
 	branding  map[string]string
 	bgStyle   map[string]string
+	keys      map[string][]*stubKey // tenant → ledger
+	keySeq    int
 }
 
 func newStub(org string) *httptest.Server {
@@ -54,6 +65,7 @@ func newStub(org string) *httptest.Server {
 		members:   map[string]string{},
 		branding:  map[string]string{},
 		bgStyle:   map[string]string{"brand_bg_fit": "", "brand_bg_position": "", "brand_bg_scrim": ""},
+		keys:      map[string][]*stubKey{},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -156,6 +168,70 @@ func newStub(org string) *httptest.Server {
 			}
 		}
 		c.RedirectUris = uris
+	}))
+
+	// tenant API keys: mirrors the live surface's rules — browser keys
+	// need origins, secret keys refuse them, mint returns key + prefix
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/keys", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		browser, _ := b["browser"].(bool)
+		origins := []string{}
+		if raw, ok := b["allowed_origins"].([]any); ok {
+			for _, o := range raw {
+				origins = append(origins, fmt.Sprint(o))
+			}
+		}
+		if browser && len(origins) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "a browser key needs at least one allowed origin"})
+			return
+		}
+		if !browser && len(origins) > 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "allowed origins are for browser keys"})
+			return
+		}
+		scopes := []string{}
+		if raw, ok := b["scopes"].([]any); ok {
+			for _, sc := range raw {
+				scopes = append(scopes, fmt.Sprint(sc))
+			}
+		}
+		s.keySeq++
+		marker := "lk_live_"
+		if browser {
+			marker = "lk_pk_live_"
+		}
+		key := fmt.Sprintf("%sSTUB%02drandomrandomrandomrandCHKSUM", marker, s.keySeq)
+		tenant := r.PathValue("tenant")
+		row := &stubKey{
+			Prefix: key[:len(marker)+4], Name: str(b, "name"),
+			Scopes: scopes, Browser: browser, AllowedOrigins: origins,
+		}
+		s.keys[tenant] = append(s.keys[tenant], row)
+		json.NewEncoder(w).Encode(map[string]any{"status": "created", "key": key, "prefix": row.Prefix})
+	}))
+	mux.HandleFunc("GET "+prefix+"/tenants/{tenant}/keys", authed(func(w http.ResponseWriter, r *http.Request) {
+		items := []stubKey{}
+		for _, k := range s.keys[r.PathValue("tenant")] {
+			items = append(items, *k)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items})
+	}))
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/keys/revoke", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		found := false
+		for _, k := range s.keys[r.PathValue("tenant")] {
+			if k.Prefix == str(b, "prefix") {
+				k.Revoked, found = true, true
+			}
+		}
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unknown key"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
 	}))
 
 	mux.HandleFunc("POST "+prefix+"/branding", authed(func(w http.ResponseWriter, r *http.Request) {

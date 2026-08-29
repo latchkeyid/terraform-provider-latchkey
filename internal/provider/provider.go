@@ -117,6 +117,7 @@ func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource
 		newMailTemplateResource,
 		newAuthDomainResource,
 		newGrantResource,
+		newApiKeyResource,
 	}
 }
 
