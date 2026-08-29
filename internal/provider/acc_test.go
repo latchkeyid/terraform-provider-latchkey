@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 )
 
 // Acceptance tests drive the real terraform CLI against the stub org API
@@ -231,7 +232,14 @@ resource "latchkey_api_key" "storefront" {
 			},
 			{
 				// a changed origin list REPLACES the key — replacement is
-				// rotation; the plan must say so
+				// rotation; the plan itself must say so, and the untouched
+				// sibling must stay put
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("latchkey_api_key.storefront", plancheck.ResourceActionReplace),
+						plancheck.ExpectResourceAction("latchkey_api_key.backend", plancheck.ResourceActionNoop),
+					},
+				},
 				Config: `
 resource "latchkey_api_key" "backend" {
   tenant = "shop"

@@ -414,6 +414,10 @@ func (c *Client) CreateTenantKey(ctx context.Context, tenant, name string, scope
 	}
 	if browser {
 		body["browser"] = true
+	}
+	// sent whenever configured — origins on a secret key must reach the
+	// server so its refusal surfaces instead of a silent omission
+	if len(allowedOrigins) > 0 {
 		body["allowed_origins"] = allowedOrigins
 	}
 	var out struct {

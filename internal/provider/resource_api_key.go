@@ -148,11 +148,18 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	resp.State.RemoveResource(ctx)
 }
 
-// Update never runs: every attribute carries RequiresReplace, because a
-// minted key cannot change — replacement IS rotation.
+// Update never runs in practice — every attribute carries
+// RequiresReplace, because a minted key cannot change and replacement IS
+// rotation. If the framework ever routes here anyway, keep the computed
+// identity from prior state and respect plan diagnostics.
 func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan apiKeyModel
+	var plan, state apiKeyModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	plan.ID, plan.Key = state.ID, state.Key
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 

@@ -202,7 +202,9 @@ func newStub(org string) *httptest.Server {
 		if browser {
 			marker = "lk_pk_live_"
 		}
-		key := fmt.Sprintf("%sSTUB%02drandomrandomrandomrandCHKSUM", marker, s.keySeq)
+		// the unique part leads so display prefixes (marker+4) never
+		// collide — a colliding stub would hide rotation bugs
+		key := fmt.Sprintf("%s%02dABrandomrandomrandomrandomCHKSUM", marker, s.keySeq)
 		tenant := r.PathValue("tenant")
 		row := &stubKey{
 			Prefix: key[:len(marker)+4], Name: str(b, "name"),
