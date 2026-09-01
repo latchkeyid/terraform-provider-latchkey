@@ -80,9 +80,9 @@ func (r *apiKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
 			},
 			"key": schema.StringAttribute{
-				Computed:    true,
-				Sensitive:   true,
-				Description: "The key plaintext — captured at create, the only copy that will ever exist.",
+				Computed:      true,
+				Sensitive:     true,
+				Description:   "The key plaintext — captured at create, the only copy that will ever exist.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 		},

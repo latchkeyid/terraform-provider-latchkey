@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -45,27 +47,85 @@ type stubKey struct {
 	Revoked        bool     `json:"revoked"`
 }
 
+type stubTenant struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+	Status      string `json:"status"`
+	Parent      string `json:"parent,omitempty"`
+	SandboxOf   string `json:"sandbox_of,omitempty"`
+	SsoRequired bool   `json:"sso_required"`
+}
+
+type stubRole struct {
+	Slug         string   `json:"slug"`
+	DisplayName  string   `json:"display_name"`
+	Capabilities []string `json:"capabilities"`
+	BaseLevel    string   `json:"base_level"`
+	Retired      bool     `json:"-"`
+}
+
+type stubBinding struct {
+	Ns    string   `json:"ns"`
+	Level string   `json:"level"`
+	Roles []string `json:"roles"`
+}
+
+type stubTeam struct {
+	Slug        string        `json:"slug"`
+	DisplayName string        `json:"display_name"`
+	Tenant      string        `json:"tenant"`
+	IdpManaged  bool          `json:"idp_managed"`
+	Deleted     bool          `json:"-"`
+	Members     []string      `json:"members"`
+	Bindings    []stubBinding `json:"bindings"`
+}
+
+type stubTGrant struct {
+	IdentityID string
+	Level      string
+	Roles      []string
+	Revoked    bool
+}
+
 type stubState struct {
-	mu        sync.Mutex
-	clients   map[string]*stubClient
-	templates map[string]stubTemplate
-	domains   map[string]bool
-	members   map[string]string // email → role
-	branding  map[string]string
-	bgStyle   map[string]string
-	keys      map[string][]*stubKey // tenant → ledger
-	keySeq    int
+	mu         sync.Mutex
+	clients    map[string]*stubClient
+	templates  map[string]stubTemplate
+	domains    map[string]bool
+	members    map[string]string // email → role
+	branding   map[string]string
+	bgStyle    map[string]string
+	keys       map[string][]*stubKey // tenant → ledger
+	keySeq     int
+	tenants    map[string]*stubTenant
+	roles      map[string]*stubRole
+	teams      map[string]*stubTeam
+	identities map[string]string      // email → identity id
+	tgrants    map[string]*stubTGrant // identity id + "|" + ns
+}
+
+// tenant/team/role slugs share one normalization rule with the live API
+var stubSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+func stubSlug(v string) (string, bool) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v, stubSlugRe.MatchString(v)
 }
 
 func newStub(org string) *httptest.Server {
 	s := &stubState{
-		clients:   map[string]*stubClient{},
-		templates: map[string]stubTemplate{},
-		domains:   map[string]bool{},
-		members:   map[string]string{},
-		branding:  map[string]string{},
-		bgStyle:   map[string]string{"brand_bg_fit": "", "brand_bg_position": "", "brand_bg_scrim": ""},
-		keys:      map[string][]*stubKey{},
+		clients:    map[string]*stubClient{},
+		templates:  map[string]stubTemplate{},
+		domains:    map[string]bool{},
+		members:    map[string]string{},
+		branding:   map[string]string{},
+		bgStyle:    map[string]string{"brand_bg_fit": "", "brand_bg_position": "", "brand_bg_scrim": ""},
+		keys:       map[string][]*stubKey{},
+		tenants:    map[string]*stubTenant{},
+		roles:      map[string]*stubRole{},
+		teams:      map[string]*stubTeam{},
+		identities: map[string]string{},
+		tgrants:    map[string]*stubTGrant{},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -98,6 +158,36 @@ func newStub(org string) *httptest.Server {
 		return out
 	}
 	str := func(m map[string]any, k string) string { v, _ := m[k].(string); return v }
+	strs := func(m map[string]any, k string) []string {
+		out := []string{}
+		if raw, ok := m[k].([]any); ok {
+			for _, v := range raw {
+				out = append(out, fmt.Sprint(v))
+			}
+		}
+		return out
+	}
+	oops := func(w http.ResponseWriter, code int, msg string) {
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	}
+	// ensure-identity by email, the org API's convergent shape
+	identity := func(email string) string {
+		email = strings.ToLower(strings.TrimSpace(email))
+		if id, ok := s.identities[email]; ok {
+			return id
+		}
+		id := uuid.NewString()
+		s.identities[email] = id
+		return id
+	}
+	liveTeam := func(slug string) *stubTeam {
+		t, ok := s.teams[slug]
+		if !ok || t.Deleted {
+			return nil
+		}
+		return t
+	}
 
 	mux.HandleFunc("GET "+prefix, authed(func(w http.ResponseWriter, r *http.Request) {
 		templates := []stubTemplate{}
@@ -290,6 +380,323 @@ func newStub(org string) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]string{"status": "released"})
 	}))
 
+	// tenants: claim-style creation (converges on an existing active
+	// tenant, refuses an archived slug), config through dedicated setters
+	mux.HandleFunc("POST "+prefix+"/tenants", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		slug, ok := stubSlug(str(b, "slug"))
+		if !ok {
+			oops(w, http.StatusBadRequest, fmt.Sprintf("%q is not a usable tenant slug", str(b, "slug")))
+			return
+		}
+		if strings.TrimSpace(str(b, "display_name")) == "" {
+			oops(w, http.StatusBadRequest, "display_name is required")
+			return
+		}
+		parent := ""
+		if raw := strings.TrimSpace(str(b, "parent")); raw != "" {
+			p, ok := stubSlug(raw)
+			if !ok {
+				oops(w, http.StatusBadRequest, fmt.Sprintf("parent: %q is not a usable tenant slug", raw))
+				return
+			}
+			pt, exists := s.tenants[p]
+			switch {
+			case !exists || pt.Status != "active":
+				oops(w, http.StatusBadRequest, "parent tenant does not exist")
+				return
+			case pt.Parent != "":
+				oops(w, http.StatusBadRequest, "parent tenant is not a root — tenants nest at most one level")
+				return
+			case pt.SandboxOf != "":
+				oops(w, http.StatusBadRequest, "a sandbox cannot be an enterprise")
+				return
+			}
+			parent = p
+		}
+		if t, exists := s.tenants[slug]; exists {
+			if t.Status == "archived" {
+				oops(w, http.StatusBadRequest, fmt.Sprintf("tenant %q is archived", slug))
+				return
+			}
+			// converge: an existing active tenant is a no-op, not an update
+			json.NewEncoder(w).Encode(map[string]string{"status": "claimed", "slug": slug})
+			return
+		}
+		s.tenants[slug] = &stubTenant{Slug: slug, DisplayName: str(b, "display_name"), Status: "active", Parent: parent}
+		json.NewEncoder(w).Encode(map[string]string{"status": "claimed", "slug": slug})
+	}))
+	mux.HandleFunc("GET "+prefix+"/tenants/{tenant}", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("tenant"))
+		t, ok := s.tenants[slug]
+		if !ok {
+			oops(w, http.StatusNotFound, "unknown tenant")
+			return
+		}
+		json.NewEncoder(w).Encode(t)
+	}))
+	tenantSetter := func(apply func(t *stubTenant, b map[string]any) (int, string)) http.HandlerFunc {
+		return authed(func(w http.ResponseWriter, r *http.Request) {
+			slug, _ := stubSlug(r.PathValue("tenant"))
+			t, ok := s.tenants[slug]
+			if !ok {
+				oops(w, http.StatusNotFound, "unknown tenant")
+				return
+			}
+			b := body(r)
+			if code, msg := apply(t, b); code != 0 {
+				oops(w, code, msg)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		})
+	}
+	archivedGuard := func(t *stubTenant) (int, string) {
+		if t.Status == "archived" {
+			return http.StatusBadRequest, fmt.Sprintf("tenant %q is archived", t.Slug)
+		}
+		return 0, ""
+	}
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/rename", tenantSetter(func(t *stubTenant, b map[string]any) (int, string) {
+		if code, msg := archivedGuard(t); code != 0 {
+			return code, msg
+		}
+		if strings.TrimSpace(str(b, "display_name")) == "" {
+			return http.StatusBadRequest, "display_name is required"
+		}
+		t.DisplayName = str(b, "display_name")
+		return 0, ""
+	}))
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/parent", tenantSetter(func(t *stubTenant, b map[string]any) (int, string) {
+		if code, msg := archivedGuard(t); code != 0 {
+			return code, msg
+		}
+		if t.SandboxOf != "" {
+			return http.StatusBadRequest, fmt.Sprintf("a sandbox keeps its prod tenant's grouping — reparent %q instead", t.SandboxOf)
+		}
+		p, ok := stubSlug(str(b, "parent"))
+		if !ok {
+			return http.StatusBadRequest, "parent tenant does not exist"
+		}
+		pt, exists := s.tenants[p]
+		switch {
+		case !exists || pt.Status != "active":
+			return http.StatusBadRequest, "parent tenant does not exist"
+		case pt.Parent != "":
+			return http.StatusBadRequest, "parent tenant is not a root — tenants nest at most one level"
+		}
+		for _, other := range s.tenants {
+			if other.Parent == t.Slug {
+				return http.StatusBadRequest, "tenant has child tenants — an enterprise cannot itself join one"
+			}
+		}
+		t.Parent = p
+		return 0, ""
+	}))
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/parent/clear", tenantSetter(func(t *stubTenant, _ map[string]any) (int, string) {
+		if code, msg := archivedGuard(t); code != 0 {
+			return code, msg
+		}
+		t.Parent = ""
+		return 0, ""
+	}))
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/sso-required", tenantSetter(func(t *stubTenant, b map[string]any) (int, string) {
+		if code, msg := archivedGuard(t); code != 0 {
+			return code, msg
+		}
+		t.SsoRequired, _ = b["required"].(bool)
+		return 0, ""
+	}))
+	mux.HandleFunc("POST "+prefix+"/tenants/{tenant}/archive", tenantSetter(func(t *stubTenant, _ map[string]any) (int, string) {
+		t.Status = "archived"
+		return 0, ""
+	}))
+	mux.HandleFunc("GET "+prefix+"/tenants/{tenant}/members", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("tenant"))
+		if _, ok := s.tenants[slug]; !ok {
+			oops(w, http.StatusNotFound, "unknown tenant")
+			return
+		}
+		ns := org + "/" + slug
+		items := []map[string]any{}
+		for key, g := range s.tgrants {
+			if g.Revoked || !strings.HasSuffix(key, "|"+ns) {
+				continue
+			}
+			items = append(items, map[string]any{
+				"identity_id": g.IdentityID, "level": g.Level, "roles": g.Roles, "source": "machine",
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items})
+	}))
+
+	// role registry: define is a full-overwrite upsert (and un-retires);
+	// the list never shows retired roles
+	mux.HandleFunc("GET "+prefix+"/roles", authed(func(w http.ResponseWriter, r *http.Request) {
+		items := []stubRole{}
+		for _, role := range s.roles {
+			if !role.Retired {
+				items = append(items, *role)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items})
+	}))
+	mux.HandleFunc("POST "+prefix+"/roles", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		slug, ok := stubSlug(str(b, "slug"))
+		if !ok {
+			oops(w, http.StatusBadRequest, fmt.Sprintf("%q is not a usable role slug", str(b, "slug")))
+			return
+		}
+		if strings.TrimSpace(str(b, "display_name")) == "" {
+			oops(w, http.StatusBadRequest, "display_name is required")
+			return
+		}
+		caps := strs(b, "capabilities")
+		for _, c := range caps {
+			if c != "manages_tenant" {
+				oops(w, http.StatusBadRequest, fmt.Sprintf("unknown capability %q", c))
+				return
+			}
+		}
+		level := str(b, "base_level")
+		if level != "" && level != "viewer" && level != "member" && level != "admin" {
+			oops(w, http.StatusBadRequest, "base_level must be admin, member or viewer")
+			return
+		}
+		s.roles[slug] = &stubRole{Slug: slug, DisplayName: str(b, "display_name"), Capabilities: caps, BaseLevel: level}
+		json.NewEncoder(w).Encode(map[string]string{"status": "defined", "slug": slug})
+	}))
+	mux.HandleFunc("POST "+prefix+"/roles/{role}/retire", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("role"))
+		if role, ok := s.roles[slug]; ok {
+			role.Retired = true
+		}
+		// a never-defined role retires to the same place — 200
+		json.NewEncoder(w).Encode(map[string]string{"status": "retired"})
+	}))
+
+	// teams: create upserts display name only; a deleted slug stays
+	// retired; membership is one-at-a-time; bindings replace as a list
+	mux.HandleFunc("POST "+prefix+"/teams", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		slug, ok := stubSlug(str(b, "slug"))
+		if !ok {
+			oops(w, http.StatusBadRequest, fmt.Sprintf("%q is not a usable team slug", str(b, "slug")))
+			return
+		}
+		tenant, _ := stubSlug(str(b, "tenant"))
+		tn, exists := s.tenants[tenant]
+		if !exists || tn.Status != "active" {
+			oops(w, http.StatusBadRequest, "tenant does not exist")
+			return
+		}
+		if strings.TrimSpace(str(b, "display_name")) == "" {
+			oops(w, http.StatusBadRequest, "display_name is required")
+			return
+		}
+		if t, taken := s.teams[slug]; taken {
+			switch {
+			case t.Deleted:
+				oops(w, http.StatusBadRequest, fmt.Sprintf("team %q was deleted — its slug stays retired", slug))
+			case t.Tenant != tenant:
+				oops(w, http.StatusBadRequest, "team slug is taken")
+			default:
+				t.DisplayName = str(b, "display_name") // the terraform path re-applies
+				json.NewEncoder(w).Encode(map[string]string{"status": "created", "slug": slug})
+			}
+			return
+		}
+		s.teams[slug] = &stubTeam{Slug: slug, Tenant: tenant, DisplayName: str(b, "display_name"), Members: []string{}, Bindings: []stubBinding{}}
+		json.NewEncoder(w).Encode(map[string]string{"status": "created", "slug": slug})
+	}))
+	mux.HandleFunc("GET "+prefix+"/teams/{team}", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("team"))
+		t := liveTeam(slug)
+		if t == nil {
+			oops(w, http.StatusNotFound, "unknown team")
+			return
+		}
+		json.NewEncoder(w).Encode(t)
+	}))
+	teamMember := func(add bool) http.HandlerFunc {
+		return authed(func(w http.ResponseWriter, r *http.Request) {
+			slug, _ := stubSlug(r.PathValue("team"))
+			t := liveTeam(slug)
+			if t == nil {
+				oops(w, http.StatusNotFound, "unknown team")
+				return
+			}
+			if t.IdpManaged {
+				oops(w, http.StatusBadRequest, "this team's membership is managed by the identity provider")
+				return
+			}
+			b := body(r)
+			id := str(b, "identity_id")
+			if id == "" {
+				email := str(b, "email")
+				if !strings.Contains(email, "@") {
+					oops(w, http.StatusBadRequest, "identity_id or email is required")
+					return
+				}
+				id = identity(email)
+			}
+			if add && !slices.Contains(t.Members, id) {
+				t.Members = append(t.Members, id)
+			}
+			if !add {
+				t.Members = slices.DeleteFunc(t.Members, func(m string) bool { return m == id })
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok", "identity_id": id})
+		})
+	}
+	mux.HandleFunc("POST "+prefix+"/teams/{team}/members", teamMember(true))
+	mux.HandleFunc("POST "+prefix+"/teams/{team}/members/remove", teamMember(false))
+	mux.HandleFunc("POST "+prefix+"/teams/{team}/bindings", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("team"))
+		t := liveTeam(slug)
+		if t == nil {
+			oops(w, http.StatusNotFound, "unknown team")
+			return
+		}
+		var b struct {
+			Bindings []stubBinding `json:"bindings"`
+		}
+		json.NewDecoder(r.Body).Decode(&b)
+		for _, bind := range b.Bindings {
+			if !strings.HasPrefix(bind.Ns, org+"/") {
+				oops(w, http.StatusBadRequest, fmt.Sprintf("namespace must start with %q — org-level roles go through the invite flow", org+"/"))
+				return
+			}
+			if bind.Level != "admin" && bind.Level != "member" && bind.Level != "viewer" {
+				oops(w, http.StatusBadRequest, bind.Ns+": level must be admin, member or viewer")
+				return
+			}
+			for _, role := range bind.Roles {
+				if live, ok := s.roles[role]; !ok || live.Retired {
+					oops(w, http.StatusBadRequest, fmt.Sprintf("role %q is not defined for this organization — declare it via POST /org/%s/roles first", role, org))
+					return
+				}
+			}
+		}
+		bindings := b.Bindings
+		if bindings == nil {
+			bindings = []stubBinding{}
+		}
+		t.Bindings = bindings
+		json.NewEncoder(w).Encode(map[string]string{"status": "bindings set"})
+	}))
+	mux.HandleFunc("POST "+prefix+"/teams/{team}/delete", authed(func(w http.ResponseWriter, r *http.Request) {
+		slug, _ := stubSlug(r.PathValue("team"))
+		t := liveTeam(slug)
+		if t == nil {
+			oops(w, http.StatusNotFound, "unknown team")
+			return
+		}
+		t.Deleted = true
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	}))
+
 	mux.HandleFunc("GET "+prefix+"/members", authed(func(w http.ResponseWriter, r *http.Request) {
 		items := []map[string]string{}
 		for email, role := range s.members {
@@ -299,11 +706,63 @@ func newStub(org string) *httptest.Server {
 	}))
 	mux.HandleFunc("POST "+prefix+"/grants", authed(func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
+		ns := str(b, "namespace")
+		// tenant grants: the live surface — sub-namespaces only, each
+		// role registry-checked, convergent upsert per (identity, ns)
+		if strings.HasPrefix(ns, org+"/") {
+			level := str(b, "level")
+			if level == "" {
+				level = str(b, "role") // legacy alias
+			}
+			if level == "owner" {
+				level = "admin"
+			}
+			if level != "admin" && level != "member" && level != "viewer" {
+				oops(w, http.StatusBadRequest, "level must be admin, member or viewer")
+				return
+			}
+			roles := strs(b, "roles")
+			for _, role := range roles {
+				if live, ok := s.roles[role]; !ok || live.Retired {
+					oops(w, http.StatusBadRequest, fmt.Sprintf("role %q is not defined for this organization — declare it via POST /org/%s/roles first", role, org))
+					return
+				}
+			}
+			id := str(b, "identity_id")
+			if id == "" {
+				email := str(b, "email")
+				if !strings.Contains(email, "@") {
+					oops(w, http.StatusBadRequest, "identity_id or email is required")
+					return
+				}
+				id = identity(email)
+			}
+			s.tgrants[id+"|"+ns] = &stubTGrant{IdentityID: id, Level: level, Roles: roles}
+			json.NewEncoder(w).Encode(map[string]string{"status": "granted", "identity_id": id})
+			return
+		}
+		// legacy org-membership branch — the LIVE API refuses a bare-org
+		// namespace ("org-level roles go through the invite flow"); kept
+		// while latchkey_grant's fate is decided so its tests still run
 		s.members[strings.ToLower(str(b, "email"))] = str(b, "role")
 		json.NewEncoder(w).Encode(map[string]string{"status": "granted"})
 	}))
 	mux.HandleFunc("POST "+prefix+"/grants/revoke", authed(func(w http.ResponseWriter, r *http.Request) {
-		delete(s.members, strings.ToLower(str(body(r), "email")))
+		b := body(r)
+		ns := str(b, "namespace")
+		if strings.HasPrefix(ns, org+"/") {
+			id := str(b, "identity_id")
+			if id == "" {
+				id = identity(str(b, "email"))
+			}
+			// idempotent — a never-granted namespace still answers 200
+			if g, ok := s.tgrants[id+"|"+ns]; ok {
+				g.Revoked = true
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
+			return
+		}
+		delete(s.members, strings.ToLower(str(b, "email")))
 		json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
 	}))
 
