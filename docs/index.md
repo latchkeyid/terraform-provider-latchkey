@@ -2,7 +2,8 @@
 
 Manage a [Latchkey](https://latchkey.id) organization's configuration as
 code: OIDC clients, membership grants, custom auth domains, hosted-page
-branding and mail templates — everything the org API exposes.
+branding, mail templates, tenants, role definitions, teams, tenant
+grants and API keys — everything the org API exposes.
 
 The provider authenticates as the org's **own confidential service
 client** (OAuth2 `client_credentials`), so Terraform can do exactly what
@@ -58,6 +59,51 @@ resource "latchkey_grant" "ops" {
   email = "ops@acme.com"
   role  = "member"
 }
+
+# Tenants are the units SSO, teams, keys and grants attach to; an
+# enterprise is a tenant other tenants point at (one level deep).
+resource "latchkey_tenant" "hq" {
+  slug         = "mcdonalds"
+  display_name = "McDonald's"
+  sso_required = true
+}
+
+resource "latchkey_tenant" "store" {
+  slug         = "store-451"
+  display_name = "Store 451"
+  parent       = latchkey_tenant.hq.slug
+}
+
+# The org's role vocabulary — granting a role confers its base_level at
+# token mint.
+resource "latchkey_role" "manager" {
+  slug         = "manager"
+  display_name = "Store manager"
+  base_level   = "admin"
+}
+
+resource "latchkey_team" "franchisees" {
+  slug         = "franchisees"
+  tenant       = latchkey_tenant.hq.slug
+  display_name = "Franchisee group"
+  bindings = [{
+    ns    = "acme/store-451"
+    level = "member"
+    roles = [latchkey_role.manager.slug]
+  }]
+}
+
+resource "latchkey_team_member" "pat" {
+  team  = latchkey_team.franchisees.slug
+  email = "pat@acme.com"
+}
+
+resource "latchkey_tenant_grant" "lee" {
+  tenant = latchkey_tenant.store.slug
+  email  = "lee@acme.com"
+  level  = "member"
+  roles  = [latchkey_role.manager.slug]
+}
 ```
 
 Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
@@ -73,6 +119,11 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_api_key` | A tenant API key — secret (`lk_live_`) or browser/publishable (`lk_pk_live_`, `browser = true` + `allowed_origins`). Immutable: any change replaces the key, which is rotation; the plaintext lands once in the sensitive `key` attribute | Revokes the key |
+| `latchkey_tenant` | A tenant — display name, enterprise `parent` pointer, `sso_required`. Creation is claim-style and convergent | **Archives — one-way, and the slug is never claimable again** |
+| `latchkey_role` | A role definition in the org registry: display name, `base_level` (admin/member/viewer conferred at mint), `capabilities` | Retires — confers nothing, refuses new grants; redefining un-retires |
+| `latchkey_team` | A team under a tenant and its bindings (what membership confers). Hand-managed only — SCIM-synced teams belong to the IdP | Soft-deletes — the slug stays retired forever |
+| `latchkey_team_member` | One identity's place on a hand-managed team (by email; the identity is ensured) | Removes the member |
+| `latchkey_tenant_grant` | One identity's grant on a `{org}/{tenant}` namespace: level + registry roles. Org-level roles deliberately stay behind the owner-gated invite flow | Revokes the grant |
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).

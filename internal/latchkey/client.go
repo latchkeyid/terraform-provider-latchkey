@@ -391,6 +391,222 @@ func (c *Client) RevokeGrant(ctx context.Context, email, namespace string) error
 	}, nil)
 }
 
+// ---- tenants ----
+
+// Tenant is the org API's tenant object. `Sandbox` (the live sandbox's
+// slug) appears only on the single GET, never in the list.
+type Tenant struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+	Status      string `json:"status"`
+	Parent      string `json:"parent"`
+	SandboxOf   string `json:"sandbox_of"`
+	Sandbox     string `json:"sandbox"`
+	SsoRequired bool   `json:"sso_required"`
+}
+
+func (c *Client) GetTenant(ctx context.Context, slug string) (*Tenant, error) {
+	var t Tenant
+	if err := c.do(ctx, http.MethodGet, "/tenants/"+url.PathEscape(slug), nil, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// ClaimTenant creates a tenant. Claim-style: re-claiming an existing
+// active tenant converges to a no-op (it does NOT update display name or
+// parent — those have their own setters); an archived slug is refused.
+func (c *Client) ClaimTenant(ctx context.Context, slug, displayName, parent string) error {
+	body := map[string]any{"slug": slug, "display_name": displayName}
+	if parent != "" {
+		body["parent"] = parent
+	}
+	return c.do(ctx, http.MethodPost, "/tenants", body, nil)
+}
+
+func (c *Client) RenameTenant(ctx context.Context, slug, displayName string) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(slug)+"/rename", map[string]any{"display_name": displayName}, nil)
+}
+
+func (c *Client) SetTenantParent(ctx context.Context, slug, parent string) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(slug)+"/parent", map[string]any{"parent": parent}, nil)
+}
+
+func (c *Client) ClearTenantParent(ctx context.Context, slug string) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(slug)+"/parent/clear", map[string]any{}, nil)
+}
+
+// SetTenantSsoRequired flips the tenant's SSO gate. The wire field is
+// `required` on write but reads back as `sso_required`.
+func (c *Client) SetTenantSsoRequired(ctx context.Context, slug string, required bool) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(slug)+"/sso-required", map[string]any{"required": required}, nil)
+}
+
+// ArchiveTenant is the tenant delete — one-way, and the slug can never
+// be re-claimed afterwards.
+func (c *Client) ArchiveTenant(ctx context.Context, slug string) error {
+	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(slug)+"/archive", map[string]any{}, nil)
+}
+
+// ---- role definitions ----
+
+type Role struct {
+	Slug         string   `json:"slug"`
+	DisplayName  string   `json:"display_name"`
+	Capabilities []string `json:"capabilities"`
+	BaseLevel    string   `json:"base_level"`
+}
+
+// Roles lists the org's live role registry — retired roles never appear.
+func (c *Client) Roles(ctx context.Context) ([]Role, error) {
+	var out struct {
+		Items []Role `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/roles", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// GetRole finds one role by slug; retired or never-defined answers
+// NotFound (the registry list is the only read-back the API offers).
+func (c *Client) GetRole(ctx context.Context, slug string) (*Role, error) {
+	items, err := c.Roles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, role := range items {
+		if role.Slug == slug {
+			return &role, nil
+		}
+	}
+	return nil, &APIError{Status: http.StatusNotFound, Message: "no role " + slug}
+}
+
+// DefineRole creates or fully overwrites a role definition — the
+// endpoint is a true upsert, and redefining un-retires.
+func (c *Client) DefineRole(ctx context.Context, role Role) error {
+	body := map[string]any{"slug": role.Slug, "display_name": role.DisplayName}
+	if len(role.Capabilities) > 0 {
+		body["capabilities"] = role.Capabilities
+	}
+	if role.BaseLevel != "" {
+		body["base_level"] = role.BaseLevel
+	}
+	return c.do(ctx, http.MethodPost, "/roles", body, nil)
+}
+
+func (c *Client) RetireRole(ctx context.Context, slug string) error {
+	return c.do(ctx, http.MethodPost, "/roles/"+url.PathEscape(slug)+"/retire", map[string]any{}, nil)
+}
+
+// ---- teams ----
+
+type TeamBinding struct {
+	Ns    string   `json:"ns"`
+	Level string   `json:"level"`
+	Roles []string `json:"roles,omitempty"`
+}
+
+type Team struct {
+	Slug        string        `json:"slug"`
+	DisplayName string        `json:"display_name"`
+	Tenant      string        `json:"tenant"`
+	IdpManaged  bool          `json:"idp_managed"`
+	Members     []string      `json:"members"`
+	Bindings    []TeamBinding `json:"bindings"`
+}
+
+func (c *Client) GetTeam(ctx context.Context, slug string) (*Team, error) {
+	var t Team
+	if err := c.do(ctx, http.MethodGet, "/teams/"+url.PathEscape(slug), nil, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// CreateTeam creates a team under a tenant, or renames it when the slug
+// already exists with the same tenant — the endpoint upserts on display
+// name only. Moving a team between tenants is refused ("slug is taken"),
+// and a deleted team's slug stays retired forever.
+func (c *Client) CreateTeam(ctx context.Context, slug, tenant, displayName string) error {
+	return c.do(ctx, http.MethodPost, "/teams", map[string]any{
+		"slug": slug, "tenant": tenant, "display_name": displayName,
+	}, nil)
+}
+
+// SetTeamBindings replaces the team's whole binding list; an empty list
+// clears every binding.
+func (c *Client) SetTeamBindings(ctx context.Context, slug string, bindings []TeamBinding) error {
+	if bindings == nil {
+		bindings = []TeamBinding{}
+	}
+	return c.do(ctx, http.MethodPost, "/teams/"+url.PathEscape(slug)+"/bindings", map[string]any{"bindings": bindings}, nil)
+}
+
+// AddTeamMember adds by email (the identity is ensured if new) and
+// returns the member's root identity id — the only key the team object
+// echoes back. Refused on idp_managed teams: the IdP owns those rosters.
+func (c *Client) AddTeamMember(ctx context.Context, team, email string) (string, error) {
+	var out struct {
+		IdentityID string `json:"identity_id"`
+	}
+	err := c.do(ctx, http.MethodPost, "/teams/"+url.PathEscape(team)+"/members", map[string]any{"email": email}, &out)
+	return out.IdentityID, err
+}
+
+func (c *Client) RemoveTeamMember(ctx context.Context, team, identityID string) error {
+	return c.do(ctx, http.MethodPost, "/teams/"+url.PathEscape(team)+"/members/remove", map[string]any{"identity_id": identityID}, nil)
+}
+
+func (c *Client) DeleteTeam(ctx context.Context, slug string) error {
+	return c.do(ctx, http.MethodPost, "/teams/"+url.PathEscape(slug)+"/delete", map[string]any{}, nil)
+}
+
+// ---- tenant grants ----
+
+// TenantMember is one row of GET /tenants/{tenant}/members — the grant
+// read-back. The namespace is implied by the path and never echoed;
+// team-conferred access never appears here.
+type TenantMember struct {
+	IdentityID string   `json:"identity_id"`
+	Level      string   `json:"level"`
+	Roles      []string `json:"roles"`
+	Source     string   `json:"source"`
+}
+
+func (c *Client) TenantMembers(ctx context.Context, tenant string) ([]TenantMember, error) {
+	var out struct {
+		Items []TenantMember `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/tenants/"+url.PathEscape(tenant)+"/members", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// GrantNamespace writes a tenant-scoped grant ({org}/{tenant} namespaces
+// only — org-level roles stay behind the owner-gated invite flow) and
+// returns the root identity id. Convergent upsert: re-granting the same
+// shape is a no-op, and a re-grant resets a prior revoke.
+func (c *Client) GrantNamespace(ctx context.Context, email, namespace, level string, roles []string) (string, error) {
+	body := map[string]any{"email": email, "namespace": namespace, "level": level}
+	if len(roles) > 0 {
+		body["roles"] = roles
+	}
+	var out struct {
+		IdentityID string `json:"identity_id"`
+	}
+	err := c.do(ctx, http.MethodPost, "/grants", body, &out)
+	return out.IdentityID, err
+}
+
+// RevokeNamespaceGrant revokes a tenant-scoped grant. Idempotent — a
+// never-granted or already-revoked namespace answers 200.
+func (c *Client) RevokeNamespaceGrant(ctx context.Context, email, namespace string) error {
+	return c.do(ctx, http.MethodPost, "/grants/revoke", map[string]any{"email": email, "namespace": namespace}, nil)
+}
+
 // ---- tenant API keys ----
 
 // TenantKey is one ledger row — the plaintext never appears here; it
