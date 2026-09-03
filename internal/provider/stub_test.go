@@ -8,6 +8,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 
 	"github.com/google/uuid"
 )
@@ -360,11 +362,15 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates", authed(func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
 		kind := str(b, "kind")
-		switch kind {
-		case "login", "login_code", "invite", "link_email", "tenant_invite":
-		default:
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unknown template kind (login, login_code, invite, link_email, tenant_invite)"})
+		if err := stubValidateTemplate(kind, str(b, "subject"), str(b, "body"), str(b, "html")); err != nil {
+			// the live API answers userError(err): the text after the
+			// last ": " — for a bad placeholder that is the "available"
+			// list, which is what a terraform apply shows
+			msg := err.Error()
+			if i := strings.LastIndex(msg, ": "); i >= 0 {
+				msg = msg[i+2:]
+			}
+			oops(w, http.StatusBadRequest, msg)
 			return
 		}
 		s.templates[kind] = stubTemplate{Kind: kind, Subject: str(b, "subject"), Body: str(b, "body"), HTML: str(b, "html")}
@@ -825,4 +831,53 @@ func newStub(org string) *httptest.Server {
 	}))
 
 	return httptest.NewServer(mux)
+}
+
+// stubTemplateData is the live API's variable allowlist
+// (identity/aggregates/business.go mailTemplateData): TenantName and
+// Role are filled for tenant_invite only. Kept in lock-step so a
+// placeholder the docs recommend is proven here, not on first apply.
+type stubTemplateData struct {
+	Link, Code, OrgName, Email, Brand, TenantName, Role string
+}
+
+// stubValidateTemplate mirrors aggregates.ValidateTemplate: a known
+// kind, non-blank subject/body, the anchor the recipient acts on
+// ({{.Code}} for login_code, {{.Link}} otherwise) in the body and any
+// html part, and every part renders with missingkey=error against the
+// sample data — an unknown placeholder such as {{.Tenant}} is a 400.
+func stubValidateTemplate(kind, subject, body, html string) error {
+	switch kind {
+	case "login", "login_code", "invite", "link_email", "tenant_invite":
+	default:
+		return fmt.Errorf("unknown template kind (login, login_code, invite, link_email, tenant_invite)")
+	}
+	if strings.TrimSpace(subject) == "" || strings.TrimSpace(body) == "" {
+		return fmt.Errorf("subject and body are required")
+	}
+	anchor, need := "{{.Link}}", "somewhere to click"
+	if kind == "login_code" {
+		anchor, need = "{{.Code}}", "the code"
+	}
+	if !strings.Contains(body, anchor) {
+		return fmt.Errorf("the body must include %s — the recipient needs %s", anchor, need)
+	}
+	if html != "" && !strings.Contains(html, anchor) {
+		return fmt.Errorf("the html must include %s — the recipient needs %s", anchor, need)
+	}
+	sample := stubTemplateData{Link: "https://example.test/x", Code: "123456", OrgName: "Org", Email: "a@example.test", Brand: "Brand", TenantName: "Tenant", Role: "role"}
+	parts := map[string]string{"subject": subject, "body": body}
+	if html != "" {
+		parts["html"] = html
+	}
+	for name, text := range parts {
+		tmpl, err := template.New(name).Option("missingkey=error").Parse(text)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if err := tmpl.Execute(io.Discard, sample); err != nil {
+			return fmt.Errorf("%s: %w (available: {{.Link}}, {{.Code}}, {{.OrgName}}, {{.Email}}, {{.Brand}}, {{.TenantName}}, {{.Role}})", name, err)
+		}
+	}
+	return nil
 }

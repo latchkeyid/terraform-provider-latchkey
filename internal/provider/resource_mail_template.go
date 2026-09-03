@@ -48,7 +48,7 @@ func (r *mailTemplateResource) Schema(_ context.Context, _ resource.SchemaReques
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"subject": schema.StringAttribute{Required: true, Description: "Subject line."},
-			"body":    schema.StringAttribute{Required: true, Description: "Plaintext body. Variables per the org API's allowlist; {{.Link}} is injected by the service."},
+			"body":    schema.StringAttribute{Required: true, Description: "Plaintext body. Variables per the org API's allowlist ({{.Link}}, {{.Code}}, {{.OrgName}}, {{.Email}}, {{.Brand}}; tenant_invite also fills {{.TenantName}} and {{.Role}}); {{.Link}} is injected by the service."},
 			"html":    schema.StringAttribute{Optional: true, Description: "Optional branded HTML alternative part; the plaintext body always rides along."},
 		},
 	}

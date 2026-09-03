@@ -135,9 +135,11 @@ resource "latchkey_mail_template" "login" {
   kind    = "login"
   subject = "Sign in"
   body    = "Click to sign in:\n{{.Link}}"
-  html    = "<p>Click to sign in</p>"
+  html    = "<p><a href=\"{{.Link}}\">Click to sign in</a></p>"
 }`,
-				Check: resource.TestCheckResourceAttr("latchkey_mail_template.login", "html", "<p>Click to sign in</p>"),
+				// the html part must carry the anchor too — the live API
+				// refuses an html alternative without {{.Link}}
+				Check: resource.TestCheckResourceAttr("latchkey_mail_template.login", "html", `<p><a href="{{.Link}}">Click to sign in</a></p>`),
 			},
 		},
 	})
@@ -162,11 +164,24 @@ resource "latchkey_mail_template" "nope" {
 				ExpectError: regexp.MustCompile(`tenant_invite`),
 			},
 			{
+				// the org API renders every part with missingkey=error over
+				// its allowlist — a placeholder outside it ({{.Tenant}} is
+				// the classic slip for {{.TenantName}}) is a 400 at apply
+				// whose message lists the variables that do exist
 				Config: `
 resource "latchkey_mail_template" "tenant_invite" {
   kind    = "tenant_invite"
-  subject = "{{.Inviter}} invited you to {{.Tenant}}"
+  subject = "You're invited to {{.Tenant}}"
   body    = "Accept your place: {{.Link}}"
+}`,
+				ExpectError: regexp.MustCompile(`\{\{\.TenantName\}\}`),
+			},
+			{
+				Config: `
+resource "latchkey_mail_template" "tenant_invite" {
+  kind    = "tenant_invite"
+  subject = "You're invited to {{.TenantName}} on {{.OrgName}}"
+  body    = "Accept your place as {{.Role}}: {{.Link}}"
 }
 
 resource "latchkey_mail_template" "login_code" {

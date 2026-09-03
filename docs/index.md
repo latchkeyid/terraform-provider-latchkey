@@ -107,7 +107,7 @@ resource "latchkey_tenant_grant" "lee" {
 
 resource "latchkey_mail_template" "tenant_invite" {
   kind    = "tenant_invite"
-  subject = "You're invited to {{.Tenant}}"
+  subject = "You're invited to {{.TenantName}} on {{.OrgName}}"
   body    = "Accept your place: {{.Link}}"
 }
 
