@@ -320,6 +320,60 @@ func (c *Client) GetTemplate(ctx context.Context, kind string) (*MailTemplate, e
 	return nil, &APIError{Status: http.StatusNotFound, Message: "no custom template of kind " + kind}
 }
 
+// ---- webhooks ----
+
+// Webhook is one signed endpoint as the org API lists it. The secret is
+// write-only: the list never echoes it.
+type Webhook struct {
+	URL    string   `json:"url"`
+	Events []string `json:"events"`
+}
+
+// SetWebhook registers or re-registers an endpoint. The service keys
+// endpoints by (org, url), so a second call with the same url rotates the
+// secret / event filter in place and re-activates a disabled endpoint.
+func (c *Client) SetWebhook(ctx context.Context, url, secret string, events []string) error {
+	if events == nil {
+		events = []string{}
+	}
+	return c.do(ctx, http.MethodPost, "/webhooks", map[string]any{
+		"url": url, "secret": secret, "events": events,
+	}, nil)
+}
+
+// Webhooks lists the org's active endpoints (disabled ones are not
+// listed).
+func (c *Client) Webhooks(ctx context.Context) ([]Webhook, error) {
+	var out struct {
+		Items []Webhook `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/webhooks", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// GetWebhook finds one active endpoint by url; NotFound when it is
+// disabled or never registered.
+func (c *Client) GetWebhook(ctx context.Context, url string) (*Webhook, error) {
+	items, err := c.Webhooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if items[i].URL == url {
+			return &items[i], nil
+		}
+	}
+	return nil, &APIError{Status: http.StatusNotFound, Message: "no active webhook at " + url}
+}
+
+// DisableWebhook stops deliveries to url. The endpoint's history stays;
+// a later SetWebhook with the same url re-activates it.
+func (c *Client) DisableWebhook(ctx context.Context, url string) error {
+	return c.do(ctx, http.MethodPost, "/webhooks/disable", map[string]any{"url": url}, nil)
+}
+
 // ---- auth domains ----
 
 type AuthDomain struct {

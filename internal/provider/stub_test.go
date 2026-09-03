@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -100,8 +101,16 @@ type stubState struct {
 	tenants    map[string]*stubTenant
 	roles      map[string]*stubRole
 	teams      map[string]*stubTeam
-	identities map[string]string      // email → identity id
-	tgrants    map[string]*stubTGrant // identity id + "|" + ns
+	identities map[string]string       // email → identity id
+	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
+	webhooks   map[string]*stubWebhook // url
+}
+
+type stubWebhook struct {
+	URL    string
+	Secret string
+	Events []string
+	Active bool
 }
 
 // tenant/team/role slugs share one normalization rule with the live API
@@ -126,6 +135,7 @@ func newStub(org string) *httptest.Server {
 		teams:      map[string]*stubTeam{},
 		identities: map[string]string{},
 		tgrants:    map[string]*stubTGrant{},
+		webhooks:   map[string]*stubWebhook{},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -350,9 +360,11 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates", authed(func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
 		kind := str(b, "kind")
-		if kind != "login" && kind != "invite" && kind != "link_email" {
+		switch kind {
+		case "login", "login_code", "invite", "link_email", "tenant_invite":
+		default:
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unknown template kind"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "unknown template kind (login, login_code, invite, link_email, tenant_invite)"})
 			return
 		}
 		s.templates[kind] = stubTemplate{Kind: kind, Subject: str(b, "subject"), Body: str(b, "body"), HTML: str(b, "html")}
@@ -361,6 +373,52 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates/clear", authed(func(w http.ResponseWriter, r *http.Request) {
 		delete(s.templates, str(body(r), "kind"))
 		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+	}))
+
+	// ---- webhooks: endpoints keyed by (org, url); the list shows only
+	// active ones plus the event catalog, exactly like the live API ----
+	stubWebhookEvents := []string{
+		"tenant.created", "tenant.renamed", "tenant.reparented", "tenant.archived",
+		"membership.set", "membership.revoked", "team.updated",
+		"invitation.created", "invitation.resent", "invitation.accepted",
+		"invitation.declined", "invitation.revoked", "invitation.expired",
+	}
+	mux.HandleFunc("GET "+prefix+"/webhooks", authed(func(w http.ResponseWriter, r *http.Request) {
+		items := []map[string]any{}
+		urls := make([]string, 0, len(s.webhooks))
+		for u := range s.webhooks {
+			urls = append(urls, u)
+		}
+		sort.Strings(urls)
+		for _, u := range urls {
+			if wh := s.webhooks[u]; wh.Active {
+				items = append(items, map[string]any{"url": wh.URL, "events": wh.Events})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items, "event_types": stubWebhookEvents})
+	}))
+	mux.HandleFunc("POST "+prefix+"/webhooks", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		u := str(b, "url")
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			oops(w, http.StatusBadRequest, "url: must be an absolute http(s) URL")
+			return
+		}
+		if str(b, "secret") == "" {
+			oops(w, http.StatusBadRequest, "secret required")
+			return
+		}
+		s.webhooks[u] = &stubWebhook{URL: u, Secret: str(b, "secret"), Events: strs(b, "events"), Active: true}
+		json.NewEncoder(w).Encode(map[string]string{"status": "set"})
+	}))
+	mux.HandleFunc("POST "+prefix+"/webhooks/disable", authed(func(w http.ResponseWriter, r *http.Request) {
+		wh, ok := s.webhooks[str(body(r), "url")]
+		if !ok {
+			oops(w, http.StatusNotFound, "unknown webhook")
+			return
+		}
+		wh.Active = false
+		json.NewEncoder(w).Encode(map[string]string{"status": "disabled"})
 	}))
 
 	mux.HandleFunc("GET "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
