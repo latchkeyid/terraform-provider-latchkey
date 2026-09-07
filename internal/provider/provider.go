@@ -124,6 +124,7 @@ func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource
 		newTeamResource,
 		newTeamMemberResource,
 		newTenantGrantResource,
+		newWebhookResource,
 	}
 }
 

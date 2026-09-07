@@ -8,12 +8,15 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"text/template"
 
 	"github.com/google/uuid"
 )
@@ -100,8 +103,16 @@ type stubState struct {
 	tenants    map[string]*stubTenant
 	roles      map[string]*stubRole
 	teams      map[string]*stubTeam
-	identities map[string]string      // email → identity id
-	tgrants    map[string]*stubTGrant // identity id + "|" + ns
+	identities map[string]string       // email → identity id
+	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
+	webhooks   map[string]*stubWebhook // url
+}
+
+type stubWebhook struct {
+	URL    string
+	Secret string
+	Events []string
+	Active bool
 }
 
 // tenant/team/role slugs share one normalization rule with the live API
@@ -126,6 +137,7 @@ func newStub(org string) *httptest.Server {
 		teams:      map[string]*stubTeam{},
 		identities: map[string]string{},
 		tgrants:    map[string]*stubTGrant{},
+		webhooks:   map[string]*stubWebhook{},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -350,9 +362,15 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates", authed(func(w http.ResponseWriter, r *http.Request) {
 		b := body(r)
 		kind := str(b, "kind")
-		if kind != "login" && kind != "invite" && kind != "link_email" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unknown template kind"})
+		if err := stubValidateTemplate(kind, str(b, "subject"), str(b, "body"), str(b, "html")); err != nil {
+			// the live API answers userError(err): the text after the
+			// last ": " — for a bad placeholder that is the "available"
+			// list, which is what a terraform apply shows
+			msg := err.Error()
+			if i := strings.LastIndex(msg, ": "); i >= 0 {
+				msg = msg[i+2:]
+			}
+			oops(w, http.StatusBadRequest, msg)
 			return
 		}
 		s.templates[kind] = stubTemplate{Kind: kind, Subject: str(b, "subject"), Body: str(b, "body"), HTML: str(b, "html")}
@@ -361,6 +379,52 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/templates/clear", authed(func(w http.ResponseWriter, r *http.Request) {
 		delete(s.templates, str(body(r), "kind"))
 		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+	}))
+
+	// ---- webhooks: endpoints keyed by (org, url); the list shows only
+	// active ones plus the event catalog, exactly like the live API ----
+	stubWebhookEvents := []string{
+		"tenant.created", "tenant.renamed", "tenant.reparented", "tenant.archived",
+		"membership.set", "membership.revoked", "team.updated",
+		"invitation.created", "invitation.resent", "invitation.accepted",
+		"invitation.declined", "invitation.revoked", "invitation.expired",
+	}
+	mux.HandleFunc("GET "+prefix+"/webhooks", authed(func(w http.ResponseWriter, r *http.Request) {
+		items := []map[string]any{}
+		urls := make([]string, 0, len(s.webhooks))
+		for u := range s.webhooks {
+			urls = append(urls, u)
+		}
+		sort.Strings(urls)
+		for _, u := range urls {
+			if wh := s.webhooks[u]; wh.Active {
+				items = append(items, map[string]any{"url": wh.URL, "events": wh.Events})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items, "event_types": stubWebhookEvents})
+	}))
+	mux.HandleFunc("POST "+prefix+"/webhooks", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		u := str(b, "url")
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			oops(w, http.StatusBadRequest, "url: must be an absolute http(s) URL")
+			return
+		}
+		if str(b, "secret") == "" {
+			oops(w, http.StatusBadRequest, "secret required")
+			return
+		}
+		s.webhooks[u] = &stubWebhook{URL: u, Secret: str(b, "secret"), Events: strs(b, "events"), Active: true}
+		json.NewEncoder(w).Encode(map[string]string{"status": "set"})
+	}))
+	mux.HandleFunc("POST "+prefix+"/webhooks/disable", authed(func(w http.ResponseWriter, r *http.Request) {
+		wh, ok := s.webhooks[str(body(r), "url")]
+		if !ok {
+			oops(w, http.StatusNotFound, "unknown webhook")
+			return
+		}
+		wh.Active = false
+		json.NewEncoder(w).Encode(map[string]string{"status": "disabled"})
 	}))
 
 	mux.HandleFunc("GET "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
@@ -767,4 +831,53 @@ func newStub(org string) *httptest.Server {
 	}))
 
 	return httptest.NewServer(mux)
+}
+
+// stubTemplateData is the live API's variable allowlist
+// (identity/aggregates/business.go mailTemplateData): TenantName and
+// Role are filled for tenant_invite only. Kept in lock-step so a
+// placeholder the docs recommend is proven here, not on first apply.
+type stubTemplateData struct {
+	Link, Code, OrgName, Email, Brand, TenantName, Role string
+}
+
+// stubValidateTemplate mirrors aggregates.ValidateTemplate: a known
+// kind, non-blank subject/body, the anchor the recipient acts on
+// ({{.Code}} for login_code, {{.Link}} otherwise) in the body and any
+// html part, and every part renders with missingkey=error against the
+// sample data — an unknown placeholder such as {{.Tenant}} is a 400.
+func stubValidateTemplate(kind, subject, body, html string) error {
+	switch kind {
+	case "login", "login_code", "invite", "link_email", "tenant_invite":
+	default:
+		return fmt.Errorf("unknown template kind (login, login_code, invite, link_email, tenant_invite)")
+	}
+	if strings.TrimSpace(subject) == "" || strings.TrimSpace(body) == "" {
+		return fmt.Errorf("subject and body are required")
+	}
+	anchor, need := "{{.Link}}", "somewhere to click"
+	if kind == "login_code" {
+		anchor, need = "{{.Code}}", "the code"
+	}
+	if !strings.Contains(body, anchor) {
+		return fmt.Errorf("the body must include %s — the recipient needs %s", anchor, need)
+	}
+	if html != "" && !strings.Contains(html, anchor) {
+		return fmt.Errorf("the html must include %s — the recipient needs %s", anchor, need)
+	}
+	sample := stubTemplateData{Link: "https://example.test/x", Code: "123456", OrgName: "Org", Email: "a@example.test", Brand: "Brand", TenantName: "Tenant", Role: "role"}
+	parts := map[string]string{"subject": subject, "body": body}
+	if html != "" {
+		parts["html"] = html
+	}
+	for name, text := range parts {
+		tmpl, err := template.New(name).Option("missingkey=error").Parse(text)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if err := tmpl.Execute(io.Discard, sample); err != nil {
+			return fmt.Errorf("%s: %w (available: {{.Link}}, {{.Code}}, {{.OrgName}}, {{.Email}}, {{.Brand}}, {{.TenantName}}, {{.Role}})", name, err)
+		}
+	}
+	return nil
 }

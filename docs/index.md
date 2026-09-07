@@ -104,6 +104,18 @@ resource "latchkey_tenant_grant" "lee" {
   level  = "member"
   roles  = [latchkey_role.manager.slug]
 }
+
+resource "latchkey_mail_template" "tenant_invite" {
+  kind    = "tenant_invite"
+  subject = "You're invited to {{.TenantName}} on {{.OrgName}}"
+  body    = "Accept your place: {{.Link}}"
+}
+
+resource "latchkey_webhook" "product" {
+  url    = "https://api.example.com/latchkey/webhooks"
+  secret = var.latchkey_webhook_secret # sensitive — never in plan output
+  events = ["invitation.*", "membership.set"]
+}
 ```
 
 Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
@@ -115,7 +127,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | --- | --- | --- |
 | `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
-| `latchkey_mail_template` | Per-org login/invite email copy (plaintext + optional HTML part) | Restores the default copy |
+| `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_api_key` | A tenant API key — secret (`lk_live_`) or browser/publishable (`lk_pk_live_`, `browser = true` + `allowed_origins`). Immutable: any change replaces the key, which is rotation; the plaintext lands once in the sensitive `key` attribute | Revokes the key |
@@ -124,6 +136,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_team` | A team under a tenant and its bindings (what membership confers). Hand-managed only — SCIM-synced teams belong to the IdP | Soft-deletes — the slug stays retired forever |
 | `latchkey_team_member` | One identity's place on a hand-managed team (by email; the identity is ensured) | Removes the member |
 | `latchkey_tenant_grant` | One identity's grant on a `{org}/{tenant}` namespace: level + registry roles. Org-level roles deliberately stay behind the owner-gated invite flow | Revokes the grant |
+| `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).
@@ -132,7 +145,12 @@ Data source: `latchkey_org` — the org's identity and configured-ness
 
 Hosted image uploads (logo/background files), provider credentials
 (SendGrid, Twilio, Turnstile — write-only secrets), and everything
-operational (sessions, logins, the fraud dashboards).
+operational (sessions, logins, the fraud dashboards, webhook deliveries
+and redelivery). Tenant invitations are runtime data too — they are
+created by products or the console, expire, and grant nothing until the
+invitee accepts — so there is deliberately no `latchkey_invitation`
+resource; manage the endpoint that hears about them (`latchkey_webhook`)
+and the email they send (`latchkey_mail_template` kind `tenant_invite`).
 
 ## Development
 

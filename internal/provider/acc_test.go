@@ -135,9 +135,65 @@ resource "latchkey_mail_template" "login" {
   kind    = "login"
   subject = "Sign in"
   body    = "Click to sign in:\n{{.Link}}"
-  html    = "<p>Click to sign in</p>"
+  html    = "<p><a href=\"{{.Link}}\">Click to sign in</a></p>"
 }`,
-				Check: resource.TestCheckResourceAttr("latchkey_mail_template.login", "html", "<p>Click to sign in</p>"),
+				// the html part must carry the anchor too — the live API
+				// refuses an html alternative without {{.Link}}
+				Check: resource.TestCheckResourceAttr("latchkey_mail_template.login", "html", `<p><a href="{{.Link}}">Click to sign in</a></p>`),
+			},
+		},
+	})
+}
+
+// every kind the org API accepts plans and applies; tenant_invite is the
+// tenant invitation email (its accept link is injected by the service)
+func TestAccMailTemplateKinds(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				// the validator names every accepted kind, tenant_invite included
+				PlanOnly: true,
+				Config: `
+resource "latchkey_mail_template" "nope" {
+  kind    = "invitation"
+  subject = "x"
+  body    = "y"
+}`,
+				ExpectError: regexp.MustCompile(`tenant_invite`),
+			},
+			{
+				// the org API renders every part with missingkey=error over
+				// its allowlist — a placeholder outside it ({{.Tenant}} is
+				// the classic slip for {{.TenantName}}) is a 400 at apply
+				// whose message lists the variables that do exist
+				Config: `
+resource "latchkey_mail_template" "tenant_invite" {
+  kind    = "tenant_invite"
+  subject = "You're invited to {{.Tenant}}"
+  body    = "Accept your place: {{.Link}}"
+}`,
+				ExpectError: regexp.MustCompile(`\{\{\.TenantName\}\}`),
+			},
+			{
+				Config: `
+resource "latchkey_mail_template" "tenant_invite" {
+  kind    = "tenant_invite"
+  subject = "You're invited to {{.TenantName}} on {{.OrgName}}"
+  body    = "Accept your place as {{.Role}}: {{.Link}}"
+}
+
+resource "latchkey_mail_template" "login_code" {
+  kind    = "login_code"
+  subject = "Your Acme code"
+  body    = "Code: {{.Code}}"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_mail_template.tenant_invite", "id", "tenant_invite"),
+					resource.TestCheckResourceAttr("latchkey_mail_template.tenant_invite", "kind", "tenant_invite"),
+					resource.TestCheckResourceAttr("latchkey_mail_template.login_code", "id", "login_code"),
+				),
 			},
 		},
 	})
@@ -433,6 +489,68 @@ resource "latchkey_tenant_grant" "alice" {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("latchkey_tenant_grant.alice", "level", "admin"),
 					resource.TestCheckNoResourceAttr("latchkey_tenant_grant.alice", "roles"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccWebhook(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_webhook" "grapevine" {
+  url    = "https://api.grapevine.test/latchkey/webhooks"
+  secret = "hook-secret-1"
+  events = ["invitation.*", "membership.set"]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "id", "https://api.grapevine.test/latchkey/webhooks"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "status", "active"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "events.#", "2"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "events.0", "invitation.*"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "events.1", "membership.set"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "secret", "hook-secret-1"),
+				),
+			},
+			{
+				// same url: secret rotation + narrower filter update in place
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("latchkey_webhook.grapevine", plancheck.ResourceActionUpdate),
+					},
+				},
+				Config: `
+resource "latchkey_webhook" "grapevine" {
+  url    = "https://api.grapevine.test/latchkey/webhooks"
+  secret = "hook-secret-2"
+  events = ["invitation.*"]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "events.#", "1"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "secret", "hook-secret-2"),
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "status", "active"),
+				),
+			},
+			{
+				// a new url is a new endpoint — replace, and the old one is
+				// disabled; unset events = the whole catalog
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("latchkey_webhook.grapevine", plancheck.ResourceActionReplace),
+					},
+				},
+				Config: `
+resource "latchkey_webhook" "grapevine" {
+  url    = "https://api.grapevine.test/latchkey/webhooks/v2"
+  secret = "hook-secret-2"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_webhook.grapevine", "id", "https://api.grapevine.test/latchkey/webhooks/v2"),
+					resource.TestCheckNoResourceAttr("latchkey_webhook.grapevine", "events"),
 				),
 			},
 		},

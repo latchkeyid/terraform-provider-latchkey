@@ -16,7 +16,7 @@ import (
 )
 
 // latchkey_mail_template — one customer-authored email body per kind
-// (login, invite). The service injects the link; a template can never
+// (login, login_code, invite, link_email, tenant_invite). The service injects the link; a template can never
 // rewrite it. Destroy restores the platform's default copy.
 type mailTemplateResource struct {
 	api *latchkey.Client
@@ -43,12 +43,12 @@ func (r *mailTemplateResource) Schema(_ context.Context, _ resource.SchemaReques
 			"id": schema.StringAttribute{Computed: true, Description: "The template kind."},
 			"kind": schema.StringAttribute{
 				Required:      true,
-				Description:   "Which email this template dresses: login, login_code, invite or link_email.",
-				Validators:    []validator.String{stringvalidator.OneOf("login", "login_code", "invite", "link_email")},
+				Description:   "Which email this template dresses: login, login_code, invite, link_email or tenant_invite (the tenant invitation email; its accept link is injected by the service).",
+				Validators:    []validator.String{stringvalidator.OneOf("login", "login_code", "invite", "link_email", "tenant_invite")},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"subject": schema.StringAttribute{Required: true, Description: "Subject line."},
-			"body":    schema.StringAttribute{Required: true, Description: "Plaintext body. Variables per the org API's allowlist; {{.Link}} is injected by the service."},
+			"body":    schema.StringAttribute{Required: true, Description: "Plaintext body. Variables per the org API's allowlist ({{.Link}}, {{.Code}}, {{.OrgName}}, {{.Email}}, {{.Brand}}; tenant_invite also fills {{.TenantName}} and {{.Role}}); {{.Link}} is injected by the service."},
 			"html":    schema.StringAttribute{Optional: true, Description: "Optional branded HTML alternative part; the plaintext body always rides along."},
 		},
 	}
