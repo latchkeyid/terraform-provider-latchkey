@@ -106,6 +106,7 @@ type stubState struct {
 	identities map[string]string       // email → identity id
 	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
 	webhooks   map[string]*stubWebhook // url
+	sandbox    bool                    // the org's {slug}-sandbox sibling has been minted
 }
 
 type stubWebhook struct {
@@ -206,7 +207,7 @@ func newStub(org string) *httptest.Server {
 		for _, t := range s.templates {
 			templates = append(templates, t)
 		}
-		json.NewEncoder(w).Encode(map[string]any{
+		out := map[string]any{
 			"slug": org, "display_name": "Stub Org", "your_role": "owner",
 			"mail_configured": true, "phone_configured": false,
 			"templates":         templates,
@@ -217,7 +218,16 @@ func newStub(org string) *httptest.Server {
 			"brand_bg_fit":      s.bgStyle["brand_bg_fit"],
 			"brand_bg_position": s.bgStyle["brand_bg_position"],
 			"brand_bg_scrim":    s.bgStyle["brand_bg_scrim"],
-		})
+		}
+		if s.sandbox {
+			out["sandbox"] = org + "-sandbox"
+		}
+		json.NewEncoder(w).Encode(out)
+	}))
+	// the org sandbox: convergent claim of {slug}-sandbox
+	mux.HandleFunc("POST "+prefix+"/sandbox", authed(func(w http.ResponseWriter, r *http.Request) {
+		s.sandbox = true
+		json.NewEncoder(w).Encode(map[string]string{"status": "created", "slug": org + "-sandbox", "sandbox_of": org})
 	}))
 
 	mux.HandleFunc("POST "+prefix+"/clients", authed(func(w http.ResponseWriter, r *http.Request) {

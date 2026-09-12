@@ -70,6 +70,23 @@ resource "latchkey_webhook" "product" {
   secret = var.latchkey_webhook_secret # sensitive — never in plan output
   events = ["invitation.*", "membership.set"]
 }
+
+# The org's environment sandbox (acme-sandbox), and its contents through a
+# second provider alias — production's service client is authorized there.
+resource "latchkey_org_sandbox" "env" {}
+
+provider "latchkey" {
+  alias  = "sandbox"
+  issuer = "https://auth.latchkey.id"
+  org    = latchkey_org_sandbox.env.slug
+}
+
+resource "latchkey_client" "app_sandbox" {
+  provider      = latchkey.sandbox
+  name          = "Acme (sandbox)"
+  public        = true
+  redirect_uris = ["acme://auth/callback"]
+}
 ```
 
 Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
@@ -83,6 +100,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
+| `latchkey_org_sandbox` | The org's environment sandbox (`{org}-sandbox`, one per org, no arguments); manage its contents with a provider alias on `slug` | Forgets it from state — Latchkey has no org delete |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
 
