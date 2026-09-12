@@ -14,11 +14,13 @@ import (
 )
 
 // latchkey_api_key — one tenant API key, secret (backend, lk_live_) or
-// browser/publishable (frontend, lk_pk_live_, origin-allowlisted — the
-// Google Maps shape). Keys are immutable: every attribute change
-// replaces the key, which is exactly key rotation. The plaintext is
-// captured at create into the sensitive `key` attribute and never
-// leaves state after that — the service stores only its hash.
+// browser/publishable (lk_pk_live_ — the Google Maps shape: origin-
+// allowlisted for a web bundle, unrestricted for a native app or a
+// server SDK). Keys are immutable: every attribute change replaces the
+// key, which is exactly key rotation. The plaintext is captured at
+// create into the sensitive `key` attribute; for a secret key that is
+// the only copy that will ever exist (the service stores its hash), a
+// publishable key also shows again in the tenant's key list.
 type apiKeyResource struct {
 	api *latchkey.Client
 }
@@ -42,9 +44,11 @@ func (r *apiKeyResource) Metadata(_ context.Context, req resource.MetadataReques
 func (r *apiKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "A tenant API key. Secret keys (lk_live_) live in the tenant's backend; " +
-			"browser keys (lk_pk_live_, `browser = true`) ship in frontend code and only verify " +
-			"from their allowed origins. Keys are immutable — any change replaces the key, which " +
-			"is key rotation. The plaintext lands once in the sensitive `key` attribute.",
+			"publishable keys (lk_pk_live_, `browser = true`) ship in code users can read — with " +
+			"allowed_origins they verify only from those origins, without they are unrestricted " +
+			"(a native app or server SDK: nothing to check an Origin against). Keys are immutable — " +
+			"any change replaces the key, which is key rotation. The plaintext lands in the " +
+			"sensitive `key` attribute.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{Computed: true, Description: "The key's display prefix.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
@@ -66,9 +70,11 @@ func (r *apiKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			},
 			"browser": schema.BoolAttribute{
 				Optional: true,
-				Description: "A publishable browser key (lk_pk_*): embedded in frontend code, " +
-					"verified only from allowed_origins. The allowlist is quota protection, not a " +
-					"secret — never gate with a browser key what a secret key should.",
+				Description: "A publishable key (lk_pk_*): embedded in code that ships to users. " +
+					"With allowed_origins it verifies only from those origins; without, it is " +
+					"unrestricted and identifies the tenant for quota only. Either way the allowlist " +
+					"is quota protection, not a secret — never gate with a publishable key what a " +
+					"secret key should.",
 				PlanModifiers: []planmodifier.Bool{boolRequiresReplace()},
 			},
 			"allowed_origins": schema.ListAttribute{
@@ -76,13 +82,13 @@ func (r *apiKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional:    true,
 				Description: "Origins a browser key verifies from (https://host[:port]; " +
 					"https://*.example.com covers subdomains, never the apex; http for localhost). " +
-					"Required with browser = true, refused without it.",
+					"Only with browser = true; omit it for an unrestricted publishable key.",
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
 			},
 			"key": schema.StringAttribute{
 				Computed:      true,
 				Sensitive:     true,
-				Description:   "The key plaintext — captured at create, the only copy that will ever exist.",
+				Description:   "The key plaintext — captured at create. For a secret key the only copy that will ever exist; a publishable key also lists in full at the service.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 		},

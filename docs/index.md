@@ -130,7 +130,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
-| `latchkey_api_key` | A tenant API key — secret (`lk_live_`) or browser/publishable (`lk_pk_live_`, `browser = true` + `allowed_origins`). Immutable: any change replaces the key, which is rotation; the plaintext lands once in the sensitive `key` attribute | Revokes the key |
+| `latchkey_api_key` | A tenant API key — secret (`lk_live_`) or publishable (`lk_pk_live_`, `browser = true`; add `allowed_origins` for a web bundle, omit it for an unrestricted key a native app or server SDK embeds). Immutable: any change replaces the key, which is rotation; the plaintext lands in the sensitive `key` attribute | Revokes the key |
 | `latchkey_tenant` | A tenant — display name, enterprise `parent` pointer, `sso_required`. Creation is claim-style and convergent | **Archives — one-way, and the slug is never claimable again** |
 | `latchkey_role` | A role definition in the org registry: display name, `base_level` (admin/member/viewer conferred at mint), `capabilities` | Retires — confers nothing, refuses new grants; redefining un-retires |
 | `latchkey_team` | A team under a tenant and its bindings (what membership confers). Hand-managed only — SCIM-synced teams belong to the IdP | Soft-deletes — the slug stays retired forever |
