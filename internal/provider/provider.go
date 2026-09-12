@@ -117,6 +117,7 @@ func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource
 		newBrandingResource,
 		newMailTemplateResource,
 		newAuthDomainResource,
+		newOrgSandboxResource,
 		newGrantResource,
 		newApiKeyResource,
 		newTenantResource,

@@ -218,6 +218,28 @@ resource "latchkey_auth_domain" "main" {
 	})
 }
 
+func TestAccOrgSandbox(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `resource "latchkey_org_sandbox" "env" {}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "id", "acme-sandbox"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "slug", "acme-sandbox"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "sandbox_of", "acme"),
+				),
+			},
+			{
+				// a second apply converges: the claim is idempotent upstream
+				Config:   `resource "latchkey_org_sandbox" "env" {}`,
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
 func TestAccGrant(t *testing.T) {
 	testIssuer(t)
 	resource.Test(t, resource.TestCase{

@@ -177,6 +177,11 @@ type Org struct {
 	BrandBgPosition string         `json:"brand_bg_position"`
 	BrandBgScrim    string         `json:"brand_bg_scrim"`
 	BrandTagline    string         `json:"brand_tagline"`
+	// Sandbox is the slug of this org's live environment sandbox
+	// ({slug}-sandbox), "" when none; SandboxOf points the other way on a
+	// sandbox org.
+	Sandbox   string `json:"sandbox"`
+	SandboxOf string `json:"sandbox_of"`
 }
 
 func (c *Client) GetOrg(ctx context.Context) (*Org, error) {
@@ -185,6 +190,19 @@ func (c *Client) GetOrg(ctx context.Context) (*Org, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// CreateSandbox mints the org's environment sandbox — {slug}-sandbox,
+// pointing back through sandbox_of, owned by this org's owner. The claim
+// converges: minting again is a no-op that still answers the slug.
+func (c *Client) CreateSandbox(ctx context.Context) (string, error) {
+	var out struct {
+		Slug string `json:"slug"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/sandbox", nil, &out); err != nil {
+		return "", err
+	}
+	return out.Slug, nil
 }
 
 // ---- clients ----
