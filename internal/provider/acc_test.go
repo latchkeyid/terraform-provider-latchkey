@@ -212,7 +212,38 @@ resource "latchkey_auth_domain" "main" {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "id", "auth.acme.test"),
 					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "issuer", "https://auth.acme.test"),
+					resource.TestCheckNoResourceAttr("latchkey_auth_domain.main", "rp_id"),
 				),
+			},
+			{
+				// passkey scope widened to the apex in place (a re-claim upstream)
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "acme.test"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "id", "auth.acme.test"),
+					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "rp_id", "acme.test"),
+				),
+			},
+			{
+				// a second apply converges
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "acme.test"
+}`,
+				PlanOnly: true,
+			},
+			{
+				// not the domain or a parent of it: the server refuses
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "elsewhere.test"
+}`,
+				ExpectError: regexp.MustCompile(`parent of it`),
 			},
 		},
 	})

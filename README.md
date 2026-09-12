@@ -52,6 +52,8 @@ resource "latchkey_mail_template" "login" {
 
 resource "latchkey_auth_domain" "main" {
   domain = "auth.acme.com" # pair with your DNS record + domain mapping
+  rp_id  = "acme.com"      # optional: passkey scope — the apex, so passkeys
+                           # enrolled on your own apps keep working here
 }
 
 resource "latchkey_grant" "ops" {

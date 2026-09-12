@@ -94,7 +94,7 @@ type stubState struct {
 	mu         sync.Mutex
 	clients    map[string]*stubClient
 	templates  map[string]stubTemplate
-	domains    map[string]bool
+	domains    map[string]string // domain -> rp_id ("" = the domain itself)
 	members    map[string]string // email → role
 	branding   map[string]string
 	bgStyle    map[string]string
@@ -129,7 +129,7 @@ func newStub(org string) *httptest.Server {
 	s := &stubState{
 		clients:    map[string]*stubClient{},
 		templates:  map[string]stubTemplate{},
-		domains:    map[string]bool{},
+		domains:    map[string]string{},
 		members:    map[string]string{},
 		branding:   map[string]string{},
 		bgStyle:    map[string]string{"brand_bg_fit": "", "brand_bg_position": "", "brand_bg_scrim": ""},
@@ -492,15 +492,22 @@ func newStub(org string) *httptest.Server {
 
 	mux.HandleFunc("GET "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
 		items := []map[string]string{}
-		for d := range s.domains {
-			items = append(items, map[string]string{"domain": d, "issuer": "https://" + d})
+		for d, rp := range s.domains {
+			items = append(items, map[string]string{"domain": d, "issuer": "https://" + d, "rp_id": rp})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"auth_domains": items})
 	}))
 	mux.HandleFunc("POST "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
-		d := strings.ToLower(str(body(r), "domain"))
-		s.domains[d] = true
-		json.NewEncoder(w).Encode(map[string]string{"domain": d})
+		b := body(r)
+		d := strings.ToLower(str(b, "domain"))
+		rp := strings.ToLower(str(b, "rp_id"))
+		// the aggregate's rule: the domain itself or a parent of it
+		if rp != "" && rp != d && !strings.HasSuffix(d, "."+rp) {
+			oops(w, http.StatusBadRequest, "rp_id must be the domain itself or a parent of it")
+			return
+		}
+		s.domains[d] = rp
+		json.NewEncoder(w).Encode(map[string]string{"domain": d, "rp_id": rp})
 	}))
 	mux.HandleFunc("POST "+prefix+"/auth-domains/release", authed(func(w http.ResponseWriter, r *http.Request) {
 		delete(s.domains, strings.ToLower(str(body(r), "domain")))

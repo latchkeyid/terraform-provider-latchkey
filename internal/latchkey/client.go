@@ -432,6 +432,9 @@ func (c *Client) DisableWebhook(ctx context.Context, url string) error {
 type AuthDomain struct {
 	Domain string `json:"domain"`
 	Issuer string `json:"issuer"`
+	// RpId is the passkey scope for the host: the domain itself (server
+	// default, reported as "") or a parent of it.
+	RpId string `json:"rp_id"`
 }
 
 func (c *Client) AuthDomains(ctx context.Context) ([]AuthDomain, error) {
@@ -444,8 +447,14 @@ func (c *Client) AuthDomains(ctx context.Context) ([]AuthDomain, error) {
 	return out.Items, nil
 }
 
-func (c *Client) ClaimAuthDomain(ctx context.Context, domain string) error {
-	return c.do(ctx, http.MethodPost, "/auth-domains", map[string]any{"domain": domain}, nil)
+// ClaimAuthDomain claims (or re-claims — the call converges) a domain for
+// the org. rpID "" leaves the passkey scope at the domain itself.
+func (c *Client) ClaimAuthDomain(ctx context.Context, domain, rpID string) error {
+	body := map[string]any{"domain": domain}
+	if rpID != "" {
+		body["rp_id"] = rpID
+	}
+	return c.do(ctx, http.MethodPost, "/auth-domains", body, nil)
 }
 
 func (c *Client) ReleaseAuthDomain(ctx context.Context, domain string) error {
