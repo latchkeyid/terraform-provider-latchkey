@@ -94,10 +94,11 @@ type stubState struct {
 	mu         sync.Mutex
 	clients    map[string]*stubClient
 	templates  map[string]stubTemplate
-	domains    map[string]bool
+	domains    map[string]string // domain -> rp_id ("" = the domain itself)
 	members    map[string]string // email → role
 	branding   map[string]string
 	bgStyle    map[string]string
+	github     map[string]string     // social_github_mode / client_id / secret, app_id / app_key
 	keys       map[string][]*stubKey // tenant → ledger
 	keySeq     int
 	tenants    map[string]*stubTenant
@@ -128,10 +129,11 @@ func newStub(org string) *httptest.Server {
 	s := &stubState{
 		clients:    map[string]*stubClient{},
 		templates:  map[string]stubTemplate{},
-		domains:    map[string]bool{},
+		domains:    map[string]string{},
 		members:    map[string]string{},
 		branding:   map[string]string{},
 		bgStyle:    map[string]string{"brand_bg_fit": "", "brand_bg_position": "", "brand_bg_scrim": ""},
+		github:     map[string]string{},
 		keys:       map[string][]*stubKey{},
 		tenants:    map[string]*stubTenant{},
 		roles:      map[string]*stubRole{},
@@ -218,6 +220,11 @@ func newStub(org string) *httptest.Server {
 			"brand_bg_fit":      s.bgStyle["brand_bg_fit"],
 			"brand_bg_position": s.bgStyle["brand_bg_position"],
 			"brand_bg_scrim":    s.bgStyle["brand_bg_scrim"],
+			// secrets never echo: mode + client id, app id + configured
+			"social_github_mode":      s.github["mode"],
+			"social_github_client_id": s.github["client_id"],
+			"github_app_id":           s.github["app_id"],
+			"github_app_configured":   s.github["app_id"] != "" && s.github["app_key"] != "",
 		}
 		if s.sandbox {
 			out["sandbox"] = org + "-sandbox"
@@ -356,6 +363,52 @@ func newStub(org string) *httptest.Server {
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
 	}))
+	// GitHub sign-in: the aggregate's shape rules — custom needs both
+	// halves, platform carries none
+	mux.HandleFunc("POST "+prefix+"/social/github", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		mode, id, secret := str(b, "mode"), str(b, "client_id"), str(b, "client_secret")
+		switch {
+		case mode != "platform" && mode != "custom":
+			oops(w, http.StatusBadRequest, "mode must be platform or custom")
+			return
+		case mode == "platform" && (id != "" || secret != ""):
+			oops(w, http.StatusBadRequest, "platform mode carries no credentials")
+			return
+		case mode == "custom" && (id == "" || secret == ""):
+			oops(w, http.StatusBadRequest, "client_id and client_secret are required")
+			return
+		}
+		s.github["mode"], s.github["client_id"], s.github["secret"] = mode, id, secret
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+	}))
+	mux.HandleFunc("POST "+prefix+"/social/github/clear", authed(func(w http.ResponseWriter, r *http.Request) {
+		delete(s.github, "mode")
+		delete(s.github, "client_id")
+		delete(s.github, "secret")
+		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+	}))
+	// the GitHub App: a numeric id and a key that must parse (the stub
+	// checks the PEM label only)
+	mux.HandleFunc("POST "+prefix+"/github/app", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		id, key := str(b, "app_id"), str(b, "private_key")
+		if id == "" || strings.Trim(id, "0123456789") != "" {
+			oops(w, http.StatusBadRequest, "app_id should be the App's numeric id")
+			return
+		}
+		if !strings.HasPrefix(key, "-----BEGIN RSA PRIVATE KEY-----") && !strings.HasPrefix(key, "-----BEGIN PRIVATE KEY-----") {
+			oops(w, http.StatusBadRequest, "private_key should be the .pem file GitHub generated")
+			return
+		}
+		s.github["app_id"], s.github["app_key"] = id, key
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+	}))
+	mux.HandleFunc("POST "+prefix+"/github/app/clear", authed(func(w http.ResponseWriter, r *http.Request) {
+		delete(s.github, "app_id")
+		delete(s.github, "app_key")
+		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+	}))
 	mux.HandleFunc("POST "+prefix+"/branding/clear", authed(func(w http.ResponseWriter, r *http.Request) {
 		s.branding = map[string]string{}
 		json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
@@ -439,15 +492,22 @@ func newStub(org string) *httptest.Server {
 
 	mux.HandleFunc("GET "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
 		items := []map[string]string{}
-		for d := range s.domains {
-			items = append(items, map[string]string{"domain": d, "issuer": "https://" + d})
+		for d, rp := range s.domains {
+			items = append(items, map[string]string{"domain": d, "issuer": "https://" + d, "rp_id": rp})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"auth_domains": items})
 	}))
 	mux.HandleFunc("POST "+prefix+"/auth-domains", authed(func(w http.ResponseWriter, r *http.Request) {
-		d := strings.ToLower(str(body(r), "domain"))
-		s.domains[d] = true
-		json.NewEncoder(w).Encode(map[string]string{"domain": d})
+		b := body(r)
+		d := strings.ToLower(str(b, "domain"))
+		rp := strings.ToLower(str(b, "rp_id"))
+		// the aggregate's rule: the domain itself or a parent of it
+		if rp != "" && rp != d && !strings.HasSuffix(d, "."+rp) {
+			oops(w, http.StatusBadRequest, "rp_id must be the domain itself or a parent of it")
+			return
+		}
+		s.domains[d] = rp
+		json.NewEncoder(w).Encode(map[string]string{"domain": d, "rp_id": rp})
 	}))
 	mux.HandleFunc("POST "+prefix+"/auth-domains/release", authed(func(w http.ResponseWriter, r *http.Request) {
 		delete(s.domains, strings.ToLower(str(body(r), "domain")))

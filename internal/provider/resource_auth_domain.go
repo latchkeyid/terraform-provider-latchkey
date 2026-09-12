@@ -26,6 +26,7 @@ type authDomainModel struct {
 	ID     types.String `tfsdk:"id"`
 	Domain types.String `tfsdk:"domain"`
 	Issuer types.String `tfsdk:"issuer"`
+	RpId   types.String `tfsdk:"rp_id"`
 }
 
 func (r *authDomainResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -46,6 +47,10 @@ func (r *authDomainResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Computed:    true,
 				Description: "The issuer URL this domain serves.",
 			},
+			"rp_id": schema.StringAttribute{
+				Optional:    true,
+				Description: "Passkey (WebAuthn) scope for this host: the domain itself when unset, or a parent of it (e.g. example.com for auth.example.com) so passkeys already enrolled against the apex keep working. Changing it strands passkeys enrolled under the previous value.",
+			},
 		},
 	}
 }
@@ -62,7 +67,7 @@ func (r *authDomainResource) Create(ctx context.Context, req resource.CreateRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.api.ClaimAuthDomain(ctx, plan.Domain.ValueString()); err != nil {
+	if err := r.api.ClaimAuthDomain(ctx, plan.Domain.ValueString(), plan.RpId.ValueString()); err != nil {
 		resp.Diagnostics.AddError("claiming auth domain", err.Error())
 		return
 	}
@@ -86,6 +91,13 @@ func (r *authDomainResource) Read(ctx context.Context, req resource.ReadRequest,
 		if d.Domain == state.Domain.ValueString() {
 			state.ID = state.Domain
 			state.Issuer = types.StringValue(d.Issuer)
+			// "" upstream means the default (the domain itself); keep an
+			// unset attribute null so an omitted rp_id stays a no-op plan.
+			if d.RpId == "" {
+				state.RpId = types.StringNull()
+			} else {
+				state.RpId = types.StringValue(d.RpId)
+			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 			return
 		}
@@ -94,10 +106,19 @@ func (r *authDomainResource) Read(ctx context.Context, req resource.ReadRequest,
 }
 
 func (r *authDomainResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// domain forces replacement and there are no other arguments; Update
-	// never runs, but the interface wants it
+	// domain forces replacement; the only in-place change is rp_id, and a
+	// re-claim by the same org is how the server takes it
 	var plan authDomainModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if err := r.api.ClaimAuthDomain(ctx, plan.Domain.ValueString(), plan.RpId.ValueString()); err != nil {
+		resp.Diagnostics.AddError("updating auth domain", err.Error())
+		return
+	}
+	plan.ID = plan.Domain
+	plan.Issuer = types.StringValue("https://" + plan.Domain.ValueString())
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 

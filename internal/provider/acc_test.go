@@ -212,7 +212,38 @@ resource "latchkey_auth_domain" "main" {
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "id", "auth.acme.test"),
 					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "issuer", "https://auth.acme.test"),
+					resource.TestCheckNoResourceAttr("latchkey_auth_domain.main", "rp_id"),
 				),
+			},
+			{
+				// passkey scope widened to the apex in place (a re-claim upstream)
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "acme.test"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "id", "auth.acme.test"),
+					resource.TestCheckResourceAttr("latchkey_auth_domain.main", "rp_id", "acme.test"),
+				),
+			},
+			{
+				// a second apply converges
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "acme.test"
+}`,
+				PlanOnly: true,
+			},
+			{
+				// not the domain or a parent of it: the server refuses
+				Config: `
+resource "latchkey_auth_domain" "main" {
+  domain = "auth.acme.test"
+  rp_id  = "elsewhere.test"
+}`,
+				ExpectError: regexp.MustCompile(`parent of it`),
 			},
 		},
 	})
@@ -633,6 +664,67 @@ resource "latchkey_api_key" "storefront" {
 					resource.TestMatchResourceAttr("latchkey_api_key.storefront", "key", regexp.MustCompile(`^lk_pk_live_`)),
 					resource.TestCheckResourceAttr("latchkey_api_key.storefront", "allowed_origins.#", "1"),
 				),
+			},
+		},
+	})
+}
+
+// TestAccGithub: both GitHub singletons — sign-in in custom mode (the
+// org's own client, secret write-only) then switched to platform (no
+// credentials), and the App (numeric id, key must look like a PEM),
+// with the org data source reporting configured-ness and never a secret.
+func TestAccGithub(t *testing.T) {
+	testIssuer(t)
+	// HCL-escaped newlines: the config is a quoted string
+	const pem = `-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n`
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_github_signin" "this" {
+  mode          = "custom"
+  client_id     = "Iv1.acme"
+  client_secret = "s3kret"
+}
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "` + pem + `"
+}
+data "latchkey_org" "this" {
+  depends_on = [latchkey_github_signin.this, latchkey_github_app.this]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "mode", "custom"),
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "client_id", "Iv1.acme"),
+					resource.TestCheckResourceAttr("latchkey_github_app.this", "app_id", "1901048"),
+					resource.TestCheckResourceAttr("data.latchkey_org.this", "github_signin", "custom"),
+					resource.TestCheckResourceAttr("data.latchkey_org.this", "github_app_id", "1901048"),
+				),
+			},
+			{
+				// platform mode drops the credentials; the App stays
+				Config: `
+resource "latchkey_github_signin" "this" {
+  mode = "platform"
+}
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "` + pem + `"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "mode", "platform"),
+					resource.TestCheckNoResourceAttr("latchkey_github_signin.this", "client_id"),
+				),
+			},
+			{
+				// the service refuses a key that is not a PEM, at plan-apply time
+				Config: `
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "not a key"
+}`,
+				ExpectError: regexp.MustCompile(`private_key should be the \.pem`),
 			},
 		},
 	})
