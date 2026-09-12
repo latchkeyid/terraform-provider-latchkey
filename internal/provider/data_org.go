@@ -23,6 +23,8 @@ type orgDataModel struct {
 	DisplayName     types.String `tfsdk:"display_name"`
 	MailConfigured  types.Bool   `tfsdk:"mail_configured"`
 	PhoneConfigured types.Bool   `tfsdk:"phone_configured"`
+	GithubSignin    types.String `tfsdk:"github_signin"`
+	GithubAppID     types.String `tfsdk:"github_app_id"`
 }
 
 func (d *orgDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -37,6 +39,8 @@ func (d *orgDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, re
 			"display_name":     schema.StringAttribute{Computed: true},
 			"mail_configured":  schema.BoolAttribute{Computed: true, Description: "Whether a SendGrid sender is wired."},
 			"phone_configured": schema.BoolAttribute{Computed: true, Description: "Whether Twilio Verify is wired."},
+			"github_signin":    schema.StringAttribute{Computed: true, Description: "Continue-with-GitHub mode: \"\" (off), \"platform\" or \"custom\"."},
+			"github_app_id":    schema.StringAttribute{Computed: true, Description: "The org's GitHub App id held for the proxy; \"\" when none."},
 		},
 	}
 }
@@ -58,5 +62,7 @@ func (d *orgDataSource) Read(ctx context.Context, req datasource.ReadRequest, re
 		DisplayName:     types.StringValue(o.DisplayName),
 		MailConfigured:  types.BoolValue(o.MailConfigured),
 		PhoneConfigured: types.BoolValue(o.PhoneConfigured),
+		GithubSignin:    types.StringValue(o.SocialGithubMode),
+		GithubAppID:     types.StringValue(o.GithubAppID),
 	})...)
 }

@@ -182,6 +182,13 @@ type Org struct {
 	// sandbox org.
 	Sandbox   string `json:"sandbox"`
 	SandboxOf string `json:"sandbox_of"`
+	// GitHub (gap 14): Continue-with-GitHub mode ("" off, "platform",
+	// "custom") and the custom client id; the org's GitHub App for the
+	// proxy — id and configured-ness, never the key.
+	SocialGithubMode     string `json:"social_github_mode"`
+	SocialGithubClientID string `json:"social_github_client_id"`
+	GithubAppID          string `json:"github_app_id"`
+	GithubAppConfigured  bool   `json:"github_app_configured"`
 }
 
 func (c *Client) GetOrg(ctx context.Context) (*Org, error) {
@@ -190,6 +197,34 @@ func (c *Client) GetOrg(ctx context.Context) (*Org, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+// ---- GitHub ----
+
+// SetGithubSignin puts Continue with GitHub on the org's hosted sign-in
+// pages: mode "platform" borrows Latchkey's OAuth app, "custom" is the
+// org's own (client id + secret — the secret is write-only).
+func (c *Client) SetGithubSignin(ctx context.Context, mode, clientID, clientSecret string) error {
+	return c.do(ctx, http.MethodPost, "/social/github", map[string]string{
+		"mode": mode, "client_id": clientID, "client_secret": clientSecret,
+	}, nil)
+}
+
+func (c *Client) ClearGithubSignin(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/social/github/clear", map[string]string{}, nil)
+}
+
+// SetGithubApp stores the org's GitHub App for the proxy: the numeric app
+// id and the private key GitHub generated (write-only; parsed on the
+// service side at set time).
+func (c *Client) SetGithubApp(ctx context.Context, appID, privateKey string) error {
+	return c.do(ctx, http.MethodPost, "/github/app", map[string]string{
+		"app_id": appID, "private_key": privateKey,
+	}, nil)
+}
+
+func (c *Client) ClearGithubApp(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/github/app/clear", map[string]string{}, nil)
 }
 
 // CreateSandbox mints the org's environment sandbox — {slug}-sandbox,

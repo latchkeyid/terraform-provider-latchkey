@@ -637,3 +637,64 @@ resource "latchkey_api_key" "storefront" {
 		},
 	})
 }
+
+// TestAccGithub: both GitHub singletons — sign-in in custom mode (the
+// org's own client, secret write-only) then switched to platform (no
+// credentials), and the App (numeric id, key must look like a PEM),
+// with the org data source reporting configured-ness and never a secret.
+func TestAccGithub(t *testing.T) {
+	testIssuer(t)
+	// HCL-escaped newlines: the config is a quoted string
+	const pem = `-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n`
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_github_signin" "this" {
+  mode          = "custom"
+  client_id     = "Iv1.acme"
+  client_secret = "s3kret"
+}
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "` + pem + `"
+}
+data "latchkey_org" "this" {
+  depends_on = [latchkey_github_signin.this, latchkey_github_app.this]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "mode", "custom"),
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "client_id", "Iv1.acme"),
+					resource.TestCheckResourceAttr("latchkey_github_app.this", "app_id", "1901048"),
+					resource.TestCheckResourceAttr("data.latchkey_org.this", "github_signin", "custom"),
+					resource.TestCheckResourceAttr("data.latchkey_org.this", "github_app_id", "1901048"),
+				),
+			},
+			{
+				// platform mode drops the credentials; the App stays
+				Config: `
+resource "latchkey_github_signin" "this" {
+  mode = "platform"
+}
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "` + pem + `"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_github_signin.this", "mode", "platform"),
+					resource.TestCheckNoResourceAttr("latchkey_github_signin.this", "client_id"),
+				),
+			},
+			{
+				// the service refuses a key that is not a PEM, at plan-apply time
+				Config: `
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = "not a key"
+}`,
+				ExpectError: regexp.MustCompile(`private_key should be the \.pem`),
+			},
+		},
+	})
+}

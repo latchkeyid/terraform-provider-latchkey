@@ -59,6 +59,19 @@ resource "latchkey_grant" "ops" {
   role  = "member"
 }
 
+# Continue with GitHub, as the org's own GitHub App (so sign-ins yield
+# GitHub App user tokens), and the App itself for the GitHub proxy.
+resource "latchkey_github_signin" "this" {
+  mode          = "custom"
+  client_id     = "Iv1.abc123"
+  client_secret = var.github_client_secret # write-only
+}
+
+resource "latchkey_github_app" "this" {
+  app_id      = "1901048"
+  private_key = file("github-app.pem") # write-only; parsed when set
+}
+
 resource "latchkey_mail_template" "tenant_invite" {
   kind    = "tenant_invite"
   subject = "You're invited to {{.TenantName}} on {{.OrgName}}"
@@ -103,14 +116,16 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_org_sandbox` | The org's environment sandbox (`{org}-sandbox`, one per org, no arguments); manage its contents with a provider alias on `slug` | Forgets it from state — Latchkey has no org delete |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
+| `latchkey_github_signin` | Continue with GitHub on the hosted sign-in pages: `mode` `platform` (borrow Latchkey's OAuth app) or `custom` (`client_id` + sensitive `client_secret`, write-only) | Removes the button |
+| `latchkey_github_app` | The org's GitHub App for the GitHub proxy: `app_id` + sensitive `private_key` (write-only; parsed when set). Products then call GitHub through `/org/{slug}/github/as-app` and `as-installation` without holding the key | Proxy calls as the App refuse |
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).
 
 ## What stays in the console
 
-Hosted image uploads (logo/background files), provider credentials
-(SendGrid, Twilio, Turnstile — write-only secrets), and everything
+Hosted image uploads (logo/background files), the mail/SMS/captcha
+provider credentials (SendGrid, Twilio, Turnstile), and everything
 operational (sessions, logins, the fraud dashboards, webhook deliveries
 and redelivery). Tenant invitations are runtime data too — they are
 created by products or the console, expire, and grant nothing until the
