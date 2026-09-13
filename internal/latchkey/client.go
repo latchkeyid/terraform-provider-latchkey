@@ -253,6 +253,11 @@ type OidcClient struct {
 	CaptchaRequired     bool     `json:"captcha_required"`
 	AttestationRequired bool     `json:"attestation_required"`
 	OtpDailyCeiling     int64    `json:"otp_daily_ceiling"`
+	// RFC 8693 actor config; no audiences = the grant is off
+	ExchangeAudiences []string `json:"exchange_audiences"`
+	ExchangeClaims    []string `json:"exchange_claims"`
+	ExchangeSubject   bool     `json:"exchange_subject"`
+	ExchangeTtl       int64    `json:"exchange_ttl"`
 }
 
 func (c *Client) Clients(ctx context.Context) ([]OidcClient, error) {
@@ -312,6 +317,21 @@ func (c *Client) SetClientAttestation(ctx context.Context, id string, required b
 
 func (c *Client) SetClientOtpCeiling(ctx context.Context, id string, ceiling int64) error {
 	return c.do(ctx, http.MethodPost, "/clients/otp-ceiling", map[string]any{"client_id": id, "otp_daily_ceiling": ceiling}, nil)
+}
+
+// SetClientExchange configures the client as an RFC 8693 actor. Empty
+// audiences turn the grant off; the server normalises the lists.
+func (c *Client) SetClientExchange(ctx context.Context, id string, audiences, claims []string, subject bool, ttl int64) error {
+	if audiences == nil {
+		audiences = []string{}
+	}
+	if claims == nil {
+		claims = []string{}
+	}
+	return c.do(ctx, http.MethodPost, "/clients/exchange", map[string]any{
+		"client_id": id, "exchange_audiences": audiences, "exchange_claims": claims,
+		"exchange_subject": subject, "exchange_ttl": ttl,
+	}, nil)
 }
 
 func (c *Client) DisableClient(ctx context.Context, id string) error {
