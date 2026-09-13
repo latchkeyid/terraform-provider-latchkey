@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -12,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
 	"github.com/latchkeyid/terraform-provider-latchkey/internal/latchkey"
 )
@@ -36,6 +38,22 @@ type clientModel struct {
 	CaptchaRequired     types.Bool   `tfsdk:"captcha_required"`
 	AttestationRequired types.Bool   `tfsdk:"attestation_required"`
 	OtpDailyCeiling     types.Int64  `tfsdk:"otp_daily_ceiling"`
+	Exchange            types.Object `tfsdk:"exchange"`
+}
+
+// exchangeModel is the `exchange` block: the client as an RFC 8693 actor.
+type exchangeModel struct {
+	Audiences types.List  `tfsdk:"audiences"`
+	Claims    types.List  `tfsdk:"claims"`
+	Subject   types.Bool  `tfsdk:"subject"`
+	TTL       types.Int64 `tfsdk:"ttl"`
+}
+
+var exchangeAttrTypes = map[string]attr.Type{
+	"audiences": types.ListType{ElemType: types.StringType},
+	"claims":    types.ListType{ElemType: types.StringType},
+	"subject":   types.BoolType,
+	"ttl":       types.Int64Type,
 }
 
 func (r *clientResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -91,8 +109,69 @@ func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional: true, Computed: true, Default: int64default.StaticInt64(0),
 				Description: "Daily SMS budget for this client; 0 uses the platform default.",
 			},
+			"exchange": schema.SingleNestedAttribute{
+				Optional: true,
+				Description: "Token exchange (RFC 8693) with this client as the actor: what it may mint at /oauth/token " +
+					"from a live Latchkey subject token. Confidential clients only. Omit the block to turn the grant off.",
+				Attributes: map[string]schema.Attribute{
+					"audiences": schema.ListAttribute{
+						ElementType: types.StringType,
+						Required:    true,
+						Description: "Audiences the actor may mint for. Never Latchkey's own (`latchkey`, `latchkey-session`) or a client id.",
+					},
+					"claims": schema.ListAttribute{
+						ElementType: types.StringType,
+						Optional:    true,
+						Description: "Top-level claim names the actor may supply (via the `claims` form field). Reserved names are refused.",
+					},
+					"subject": schema.BoolAttribute{
+						Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+						Description: "Whether the actor may replace `sub` — the shape a cloud's trust policy matches on.",
+					},
+					"ttl": schema.Int64Attribute{
+						Optional: true, Computed: true, Default: int64default.StaticInt64(0),
+						Description: "Ceiling on a minted token's lifetime, seconds (60–86400); 0 = 1h. `expires_in` may shorten it per token, never lengthen.",
+					},
+				},
+			},
 		},
 	}
+}
+
+// exchangeArgs decodes the block into the API call's arguments; a null
+// block is the grant switched off.
+func exchangeArgs(ctx context.Context, o types.Object) (auds, claims []string, subject bool, ttl int64) {
+	if o.IsNull() || o.IsUnknown() {
+		return nil, nil, false, 0
+	}
+	var m exchangeModel
+	if diags := o.As(ctx, &m, basetypes.ObjectAsOptions{}); diags.HasError() {
+		return nil, nil, false, 0
+	}
+	return stringList(ctx, m.Audiences), stringList(ctx, m.Claims), m.Subject.ValueBool(), m.TTL.ValueInt64()
+}
+
+// exchangeValue renders what the server holds as the block — null when
+// the grant is off, so a config that omits the block converges.
+func exchangeValue(ctx context.Context, c *latchkey.OidcClient, prior types.Object) types.Object {
+	if len(c.ExchangeAudiences) == 0 {
+		return types.ObjectNull(exchangeAttrTypes)
+	}
+	var priorM exchangeModel
+	if !prior.IsNull() && !prior.IsUnknown() {
+		_ = prior.As(ctx, &priorM, basetypes.ObjectAsOptions{})
+	}
+	claims := stringListValue(ctx, c.ExchangeClaims, priorM.Claims)
+	if len(c.ExchangeClaims) == 0 && (priorM.Claims.IsNull() || priorM.Claims.IsUnknown()) {
+		claims = types.ListNull(types.StringType)
+	}
+	v, _ := types.ObjectValue(exchangeAttrTypes, map[string]attr.Value{
+		"audiences": stringListValue(ctx, c.ExchangeAudiences, priorM.Audiences),
+		"claims":    claims,
+		"subject":   types.BoolValue(c.ExchangeSubject),
+		"ttl":       types.Int64Value(c.ExchangeTtl),
+	})
+	return v
 }
 
 func (r *clientResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
@@ -150,6 +229,14 @@ func (r *clientResource) applySettings(ctx context.Context, id string, plan, pri
 			return err
 		}
 	}
+	// one endpoint for the whole block; the server converges an equal set,
+	// so re-sending on any change is cheap and a removed block clears it
+	if !plan.Exchange.Equal(prior.Exchange) && !(plan.Exchange.IsNull() && prior.Exchange.IsNull()) {
+		auds, claims, subject, ttl := exchangeArgs(ctx, plan.Exchange)
+		if err := r.api.SetClientExchange(ctx, id, auds, claims, subject, ttl); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -175,6 +262,7 @@ func (r *clientResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.CaptchaRequired = types.BoolValue(c.CaptchaRequired)
 	state.AttestationRequired = types.BoolValue(c.AttestationRequired)
 	state.OtpDailyCeiling = types.Int64Value(c.OtpDailyCeiling)
+	state.Exchange = exchangeValue(ctx, c, state.Exchange)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 

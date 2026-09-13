@@ -77,6 +77,68 @@ resource "latchkey_client" "web" {
 	})
 }
 
+// TestAccClientExchange: the `exchange` block configures a confidential
+// client as an RFC 8693 actor, changes in place, and is the grant
+// switched off when removed — with state converging to null, not `[]`.
+func TestAccClientExchange(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_client" "backend" {
+  name   = "acme-backend"
+  public = false
+  secret = "s3cret"
+  exchange = {
+    audiences = ["runsheet-chippy-cloud"]
+    claims    = ["https://aws.amazon.com/tags"]
+    subject   = true
+    ttl       = 3600
+  }
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.audiences.0", "runsheet-chippy-cloud"),
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.claims.0", "https://aws.amazon.com/tags"),
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.subject", "true"),
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.ttl", "3600"),
+				),
+			},
+			{
+				// in place: a second audience, no claims, defaults for the rest
+				Config: `
+resource "latchkey_client" "backend" {
+  name   = "acme-backend"
+  public = false
+  secret = "s3cret"
+  exchange = {
+    audiences = ["cloud", "runsheet-chippy-cloud"]
+  }
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.audiences.#", "2"),
+					resource.TestCheckNoResourceAttr("latchkey_client.backend", "exchange.claims.#"),
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.subject", "false"),
+					resource.TestCheckResourceAttr("latchkey_client.backend", "exchange.ttl", "0"),
+				),
+			},
+			{
+				// removed: the grant is off and the block is absent from state
+				Config: `
+resource "latchkey_client" "backend" {
+  name   = "acme-backend"
+  public = false
+  secret = "s3cret"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("latchkey_client.backend", "exchange.audiences.#"),
+				),
+			},
+		},
+	})
+}
+
 func TestAccBranding(t *testing.T) {
 	testIssuer(t)
 	resource.Test(t, resource.TestCase{

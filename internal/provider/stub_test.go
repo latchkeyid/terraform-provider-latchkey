@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -29,6 +30,10 @@ type stubClient struct {
 	CaptchaRequired     bool     `json:"captcha_required"`
 	AttestationRequired bool     `json:"attestation_required"`
 	OtpDailyCeiling     int64    `json:"otp_daily_ceiling"`
+	ExchangeAudiences   []string `json:"exchange_audiences"`
+	ExchangeClaims      []string `json:"exchange_claims"`
+	ExchangeSubject     bool     `json:"exchange_subject"`
+	ExchangeTtl         int64    `json:"exchange_ttl"`
 }
 
 type stubTemplate struct {
@@ -249,6 +254,25 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/clients/otp-ceiling", clientSetter(func(c *stubClient, b map[string]any) {
 		v, _ := b["otp_daily_ceiling"].(float64)
 		c.OtpDailyCeiling = int64(v)
+	}))
+	mux.HandleFunc("POST "+prefix+"/clients/exchange", clientSetter(func(c *stubClient, b map[string]any) {
+		strs := func(k string) []string {
+			out := []string{}
+			if raw, ok := b[k].([]any); ok {
+				for _, v := range raw {
+					out = append(out, fmt.Sprint(v))
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+		c.ExchangeAudiences, c.ExchangeClaims = strs("exchange_audiences"), strs("exchange_claims")
+		c.ExchangeSubject, _ = b["exchange_subject"].(bool)
+		ttl, _ := b["exchange_ttl"].(float64)
+		c.ExchangeTtl = int64(ttl)
+		if len(c.ExchangeAudiences) == 0 {
+			c.ExchangeClaims, c.ExchangeSubject, c.ExchangeTtl = []string{}, false, 0
+		}
 	}))
 	mux.HandleFunc("POST "+prefix+"/clients/redirect-uris", clientSetter(func(c *stubClient, b map[string]any) {
 		uris := []string{}

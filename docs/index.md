@@ -36,6 +36,16 @@ resource "latchkey_client" "backend" {
   name   = "acme-backend"
   public = false
   secret = var.backend_client_secret # hashed client-side before it leaves Terraform
+
+  # RFC 8693 token exchange, this client as the actor: turn a live Latchkey
+  # token into one an external system trusts (a cloud's OIDC federation,
+  # your own API). Omit the block to keep the grant off.
+  exchange = {
+    audiences = ["acme-cloud-federation"]
+    claims    = ["https://aws.amazon.com/tags"]
+    subject   = true # may replace `sub` — the shape the trust policy matches
+    ttl       = 3600 # ceiling; expires_in may shorten per token
+  }
 }
 
 resource "latchkey_branding" "this" {
@@ -113,7 +123,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 | Resource | Manages | On destroy |
 | --- | --- | --- |
-| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) | Disables — client ids are never reused |
+| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) and, for a confidential client, its RFC 8693 `exchange` allow-list (audiences, claim names, subject override, TTL ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org login/invite email copy (plaintext + optional HTML part) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
