@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
@@ -28,6 +32,8 @@ type clientResource struct {
 
 func newClientResource() resource.Resource { return &clientResource{} }
 
+var _ resource.ResourceWithModifyPlan = (*clientResource)(nil)
+
 type clientModel struct {
 	ID                  types.String `tfsdk:"id"`
 	Name                types.String `tfsdk:"name"`
@@ -39,6 +45,22 @@ type clientModel struct {
 	AttestationRequired types.Bool   `tfsdk:"attestation_required"`
 	OtpDailyCeiling     types.Int64  `tfsdk:"otp_daily_ceiling"`
 	Exchange            types.Object `tfsdk:"exchange"`
+	ReviewLogin         types.Object `tfsdk:"review_login"`
+}
+
+// the review_login block: who signs in with the fixed code
+type reviewLoginModel struct {
+	Email  types.String `tfsdk:"email"`
+	Phone  types.String `tfsdk:"phone"`
+	Domain types.String `tfsdk:"domain"`
+	Code   types.String `tfsdk:"code"`
+}
+
+var reviewLoginAttrTypes = map[string]attr.Type{
+	"email":  types.StringType,
+	"phone":  types.StringType,
+	"domain": types.StringType,
+	"code":   types.StringType,
 }
 
 // exchangeModel is the `exchange` block: the client as an RFC 8693 actor.
@@ -134,8 +156,87 @@ func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					},
 				},
 			},
+			"review_login": schema.SingleNestedAttribute{
+				Optional: true,
+				Description: "The review / test-identity sign-in: the named email and/or phone, and every address under `domain`, " +
+					"sign in with the fixed `code` and receive no email or SMS (the mailbox or number need not exist). " +
+					"For app-store reviewers (the store's App Review sign-in fields) and for the test users of an acceptance suite. " +
+					"Public clients only. Omit the block to turn it off. At least one of email, phone, domain is required.",
+				Attributes: map[string]schema.Attribute{
+					"email": schema.StringAttribute{
+						Optional: true, Computed: true, Default: stringdefault.StaticString(""),
+						Description: "One address that signs in with the code.",
+					},
+					"phone": schema.StringAttribute{
+						Optional: true, Computed: true, Default: stringdefault.StaticString(""),
+						Description: "One E.164 number that signs in with the code.",
+					},
+					"domain": schema.StringAttribute{
+						Optional: true, Computed: true, Default: stringdefault.StaticString(""),
+						Description: "A bare domain you control (e.g. `review.example.com`): every address under it signs in with the code. Exact match — subdomains do not.",
+					},
+					"code": schema.StringAttribute{
+						Required: true, Sensitive: true,
+						Description: "The fixed code, 6–12 digits. Write-only: the API never returns it, so Terraform trusts its own state.",
+					},
+				},
+			},
 		},
 	}
+}
+
+// reviewLoginArgs decodes the block; a null block clears the sign-in.
+func reviewLoginArgs(ctx context.Context, o types.Object) (email, phone, domain, code string) {
+	if o.IsNull() || o.IsUnknown() {
+		return "", "", "", ""
+	}
+	var m reviewLoginModel
+	if diags := o.As(ctx, &m, basetypes.ObjectAsOptions{}); diags.HasError() {
+		return "", "", "", ""
+	}
+	return m.Email.ValueString(), m.Phone.ValueString(), m.Domain.ValueString(), m.Code.ValueString()
+}
+
+// normalizeReviewLogin folds the block the way the server stores it
+// (lower-case email and domain, no leading "@"), so the state written
+// straight from the plan matches the next Read instead of drifting.
+// Phones are stored E.164 server-side; configure them that way.
+func normalizeReviewLogin(ctx context.Context, o types.Object) types.Object {
+	if o.IsNull() || o.IsUnknown() {
+		return o
+	}
+	email, phone, domain, code := reviewLoginArgs(ctx, o)
+	v, _ := types.ObjectValue(reviewLoginAttrTypes, map[string]attr.Value{
+		"email":  types.StringValue(strings.ToLower(strings.TrimSpace(email))),
+		"phone":  types.StringValue(strings.TrimSpace(phone)),
+		"domain": types.StringValue(strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "@"))),
+		"code":   types.StringValue(code),
+	})
+	return v
+}
+
+// reviewLoginValue renders what the server holds — null when no principal
+// is set, so an omitted block converges. The code never comes back from
+// the API: it is carried forward from prior state (a fresh import reads it
+// as empty, and the next apply re-sends the configured one).
+func reviewLoginValue(ctx context.Context, c *latchkey.OidcClient, prior types.Object) types.Object {
+	if c.ReviewEmail == "" && c.ReviewPhone == "" && c.ReviewDomain == "" {
+		return types.ObjectNull(reviewLoginAttrTypes)
+	}
+	code := ""
+	if !prior.IsNull() && !prior.IsUnknown() {
+		var priorM reviewLoginModel
+		if diags := prior.As(ctx, &priorM, basetypes.ObjectAsOptions{}); !diags.HasError() {
+			code = priorM.Code.ValueString()
+		}
+	}
+	v, _ := types.ObjectValue(reviewLoginAttrTypes, map[string]attr.Value{
+		"email":  types.StringValue(c.ReviewEmail),
+		"phone":  types.StringValue(c.ReviewPhone),
+		"domain": types.StringValue(c.ReviewDomain),
+		"code":   types.StringValue(code),
+	})
+	return v
 }
 
 // exchangeArgs decodes the block into the API call's arguments; a null
@@ -206,6 +307,37 @@ func (r *clientResource) Create(ctx context.Context, req resource.CreateRequest,
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
+// ModifyPlan insists review_login is written the way the server stores
+// it (lower-case email and domain, no leading "@", nothing to trim).
+// Terraform forbids a plan that differs from config for a set attribute
+// and forbids apply from changing a planned value, so the provider
+// cannot fold silently — it names the canonical form instead, and the
+// state then always matches the next Read.
+func (r *clientResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return // destroy
+	}
+	var plan clientModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() || plan.ReviewLogin.IsNull() || plan.ReviewLogin.IsUnknown() {
+		return
+	}
+	email, phone, domain, _ := reviewLoginArgs(ctx, plan.ReviewLogin)
+	if email == "" && phone == "" && domain == "" {
+		resp.Diagnostics.AddAttributeError(path.Root("review_login"), "review_login needs a principal",
+			"Set at least one of email, phone or domain, or omit the block to turn the review sign-in off.")
+		return
+	}
+	folded := normalizeReviewLogin(ctx, plan.ReviewLogin)
+	if !folded.Equal(plan.ReviewLogin) {
+		var want reviewLoginModel
+		_ = folded.As(ctx, &want, basetypes.ObjectAsOptions{})
+		resp.Diagnostics.AddAttributeError(path.Root("review_login"), "review_login is not in its stored form",
+			fmt.Sprintf("Write the email and domain lower-case with no leading \"@\" and nothing to trim, as the server stores them: email = %q, phone = %q, domain = %q.",
+				want.Email.ValueString(), want.Phone.ValueString(), want.Domain.ValueString()))
+	}
+}
+
 // applySettings pushes the per-flag setters, skipping what matches prior
 // state — each flag is its own endpoint and its own event.
 func (r *clientResource) applySettings(ctx context.Context, id string, plan, prior clientModel) error {
@@ -237,6 +369,13 @@ func (r *clientResource) applySettings(ctx context.Context, id string, plan, pri
 			return err
 		}
 	}
+	// same shape: one endpoint, the server converges, a removed block clears
+	if !plan.ReviewLogin.Equal(prior.ReviewLogin) && !(plan.ReviewLogin.IsNull() && prior.ReviewLogin.IsNull()) {
+		email, phone, domain, code := reviewLoginArgs(ctx, plan.ReviewLogin)
+		if err := r.api.SetClientReviewLogin(ctx, id, email, phone, domain, code); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -263,6 +402,7 @@ func (r *clientResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.AttestationRequired = types.BoolValue(c.AttestationRequired)
 	state.OtpDailyCeiling = types.Int64Value(c.OtpDailyCeiling)
 	state.Exchange = exchangeValue(ctx, c, state.Exchange)
+	state.ReviewLogin = reviewLoginValue(ctx, c, state.ReviewLogin)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 

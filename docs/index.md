@@ -32,6 +32,21 @@ resource "latchkey_client" "web" {
   redirect_uris = ["https://app.acme.com/callback"]
 }
 
+resource "latchkey_client" "app" {
+  name          = "acme-app"
+  redirect_uris = ["acme://auth/callback"]
+
+  # Who signs in with a fixed code and gets no email/SMS: the app-store
+  # reviewer's address, and every address under a test-identity domain
+  # (owner-1@review.acme.com, admin-2@…) for an acceptance suite. Use a
+  # domain you control. Omit the block to turn it off.
+  review_login = {
+    email  = "applereview@acme.com"
+    domain = "review.acme.com"
+    code   = var.review_code # 6–12 digits; write-only, kept in state
+  }
+}
+
 resource "latchkey_client" "backend" {
   name   = "acme-backend"
   public = false
@@ -135,7 +150,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 | Resource | Manages | On destroy |
 | --- | --- | --- |
-| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) and, for a confidential client, its RFC 8693 `exchange` allow-list (audiences, claim names, subject override, TTL ceiling) | Disables — client ids are never reused |
+| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling), its `review_login` (the reviewer email/phone and test-identity domain that sign in with a fixed code) and, for a confidential client, its RFC 8693 `exchange` allow-list (audiences, claim names, subject override, TTL ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |

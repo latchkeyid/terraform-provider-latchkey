@@ -77,6 +77,79 @@ resource "latchkey_client" "web" {
 	})
 }
 
+// TestAccClientReviewLogin: the `review_login` block names who signs in
+// with the fixed code — an app-store reviewer's address, or every address
+// under a test-identity domain — changes in place, and clears when
+// removed. The code is write-only on the API, so state carries it.
+func TestAccClientReviewLogin(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				// not in stored form: the provider names the canonical value
+				// rather than folding (Terraform forbids a plan that differs
+				// from config)
+				Config: `
+resource "latchkey_client" "app" {
+  name          = "acme-app"
+  redirect_uris = ["acme://auth/callback"]
+  review_login = {
+    email = "AppleReview@acme.test"
+    code  = "424242"
+  }
+}`,
+				ExpectError: regexp.MustCompile(`not in its stored form`),
+			},
+			{
+				Config: `
+resource "latchkey_client" "app" {
+  name          = "acme-app"
+  redirect_uris = ["acme://auth/callback"]
+  review_login = {
+    email = "applereview@acme.test"
+    code  = "424242"
+  }
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.email", "applereview@acme.test"),
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.phone", ""),
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.domain", ""),
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.code", "424242"),
+				),
+			},
+			{
+				// in place: a test-identity domain joins the reviewer's address
+				Config: `
+resource "latchkey_client" "app" {
+  name          = "acme-app"
+  redirect_uris = ["acme://auth/callback"]
+  review_login = {
+    email  = "applereview@acme.test"
+    domain = "review.acme.test"
+    code   = "424242"
+  }
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.domain", "review.acme.test"),
+					resource.TestCheckResourceAttr("latchkey_client.app", "review_login.email", "applereview@acme.test"),
+				),
+			},
+			{
+				// removed: cleared, and the block is absent from state
+				Config: `
+resource "latchkey_client" "app" {
+  name          = "acme-app"
+  redirect_uris = ["acme://auth/callback"]
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckNoResourceAttr("latchkey_client.app", "review_login.email"),
+				),
+			},
+		},
+	})
+}
+
 // TestAccClientExchange: the `exchange` block configures a confidential
 // client as an RFC 8693 actor, changes in place, and is the grant
 // switched off when removed — with state converging to null, not `[]`.
