@@ -253,6 +253,11 @@ type OidcClient struct {
 	CaptchaRequired     bool     `json:"captcha_required"`
 	AttestationRequired bool     `json:"attestation_required"`
 	OtpDailyCeiling     int64    `json:"otp_daily_ceiling"`
+	// the store-review / test-identity principals; the fixed code never
+	// comes back from the API
+	ReviewEmail  string `json:"review_email"`
+	ReviewPhone  string `json:"review_phone"`
+	ReviewDomain string `json:"review_domain"`
 	// RFC 8693 actor config; no audiences = the grant is off
 	ExchangeAudiences []string `json:"exchange_audiences"`
 	ExchangeClaims    []string `json:"exchange_claims"`
@@ -331,6 +336,15 @@ func (c *Client) SetClientExchange(ctx context.Context, id string, audiences, cl
 	return c.do(ctx, http.MethodPost, "/clients/exchange", map[string]any{
 		"client_id": id, "exchange_audiences": audiences, "exchange_claims": claims,
 		"exchange_subject": subject, "exchange_ttl": ttl,
+	}, nil)
+}
+
+// SetClientReviewLogin names the client's review sign-in: the one email
+// and/or phone, and/or a whole domain, whose tickets accept the fixed
+// code and send nothing. All principals empty clears it (code ignored).
+func (c *Client) SetClientReviewLogin(ctx context.Context, id, email, phone, domain, code string) error {
+	return c.do(ctx, http.MethodPost, "/clients/review-login", map[string]any{
+		"client_id": id, "review_email": email, "review_phone": phone, "review_domain": domain, "review_code": code,
 	}, nil)
 }
 

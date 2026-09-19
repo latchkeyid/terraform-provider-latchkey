@@ -32,6 +32,10 @@ type stubClient struct {
 	CaptchaRequired     bool     `json:"captcha_required"`
 	AttestationRequired bool     `json:"attestation_required"`
 	OtpDailyCeiling     int64    `json:"otp_daily_ceiling"`
+	ReviewEmail         string   `json:"review_email"`
+	ReviewPhone         string   `json:"review_phone"`
+	ReviewDomain        string   `json:"review_domain"`
+	ReviewCode          string   `json:"-"` // never listed, like the live API
 	ExchangeAudiences   []string `json:"exchange_audiences"`
 	ExchangeClaims      []string `json:"exchange_claims"`
 	ExchangeSubject     bool     `json:"exchange_subject"`
@@ -282,6 +286,15 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/clients/otp-ceiling", clientSetter(func(c *stubClient, b map[string]any) {
 		v, _ := b["otp_daily_ceiling"].(float64)
 		c.OtpDailyCeiling = int64(v)
+	}))
+	mux.HandleFunc("POST "+prefix+"/clients/review-login", clientSetter(func(c *stubClient, b map[string]any) {
+		c.ReviewEmail = strings.ToLower(strings.TrimSpace(str(b, "review_email")))
+		c.ReviewPhone = strings.TrimSpace(str(b, "review_phone"))
+		c.ReviewDomain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(str(b, "review_domain")), "@"))
+		c.ReviewCode = strings.TrimSpace(str(b, "review_code"))
+		if c.ReviewEmail == "" && c.ReviewPhone == "" && c.ReviewDomain == "" {
+			c.ReviewCode = ""
+		}
 	}))
 	mux.HandleFunc("POST "+prefix+"/clients/exchange", clientSetter(func(c *stubClient, b map[string]any) {
 		strs := func(k string) []string {
