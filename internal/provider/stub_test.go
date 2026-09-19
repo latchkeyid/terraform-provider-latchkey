@@ -116,6 +116,17 @@ type stubState struct {
 	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
 	webhooks   map[string]*stubWebhook // url
 	sandbox    bool                    // the org's {slug}-sandbox sibling has been minted
+	orgs       map[string]*stubOrg     // the estate's created orgs, by slug
+}
+
+// stubOrg is an org the estate created (POST /platform/orgs): the live
+// name and owner ride along on the list, the secret only on creation.
+type stubOrg struct {
+	Slug              string `json:"slug"`
+	DisplayName       string `json:"display_name"`
+	OwnerID           string `json:"owner_id"`
+	OwnerEmail        string `json:"owner_email"`
+	TerraformClientID string `json:"terraform_client_id"`
 }
 
 type stubWebhook struct {
@@ -124,6 +135,9 @@ type stubWebhook struct {
 	Events []string
 	Active bool
 }
+
+// org slugs: the live NormalizeSlug rule (1–32, hyphens not at the ends)
+var stubOrgSlugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`)
 
 // tenant/team/role slugs share one normalization rule with the live API
 var stubSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -149,6 +163,7 @@ func newStub(org string) *httptest.Server {
 		identities: map[string]string{},
 		tgrants:    map[string]*stubTGrant{},
 		webhooks:   map[string]*stubWebhook{},
+		orgs:       map[string]*stubOrg{},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -243,6 +258,50 @@ func newStub(org string) *httptest.Server {
 	mux.HandleFunc("POST "+prefix+"/sandbox", authed(func(w http.ResponseWriter, r *http.Request) {
 		s.sandbox = true
 		json.NewEncoder(w).Encode(map[string]string{"status": "created", "slug": org + "-sandbox", "sandbox_of": org})
+	}))
+
+	// the estate (gap 21): orgs created by API, each with a default
+	// confidential `terraform` client whose secret comes back once. The
+	// stub's one credential is an estate owner; the live gate is the
+	// estate's owner list.
+	mux.HandleFunc("GET /platform/orgs", authed(func(w http.ResponseWriter, r *http.Request) {
+		orgs := []stubOrg{}
+		for _, o := range s.orgs {
+			orgs = append(orgs, *o)
+		}
+		sort.Slice(orgs, func(i, j int) bool { return orgs[i].Slug < orgs[j].Slug })
+		json.NewEncoder(w).Encode(map[string]any{"orgs": orgs})
+	}))
+	mux.HandleFunc("POST /platform/orgs", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		slug := strings.ToLower(strings.TrimSpace(str(b, "slug")))
+		if !stubOrgSlugRe.MatchString(slug) {
+			oops(w, http.StatusBadRequest, "slug must be 1–32 characters: a–z, 0–9, hyphens (not at the ends)")
+			return
+		}
+		if strings.TrimSpace(str(b, "display_name")) == "" {
+			oops(w, http.StatusBadRequest, "display_name is required")
+			return
+		}
+		email := strings.ToLower(strings.TrimSpace(str(b, "owner_email")))
+		if !strings.Contains(email, "@") {
+			oops(w, http.StatusBadRequest, "owner_email is required")
+			return
+		}
+		if _, taken := s.orgs[slug]; taken || slug == org {
+			oops(w, http.StatusConflict, "organization "+slug+" already exists")
+			return
+		}
+		o := &stubOrg{
+			Slug: slug, DisplayName: strings.TrimSpace(str(b, "display_name")),
+			OwnerID: identity(email), OwnerEmail: email, TerraformClientID: uuid.NewString(),
+		}
+		s.orgs[slug] = o
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "created", "slug": o.Slug, "display_name": o.DisplayName,
+			"owner_id": o.OwnerID, "owner_email": o.OwnerEmail,
+			"terraform_client_id": o.TerraformClientID, "terraform_client_secret": "stub-" + uuid.NewString(),
+		})
 	}))
 
 	mux.HandleFunc("POST "+prefix+"/clients", authed(func(w http.ResponseWriter, r *http.Request) {

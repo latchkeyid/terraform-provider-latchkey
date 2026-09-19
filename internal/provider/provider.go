@@ -113,6 +113,7 @@ func envName(attr string) string {
 
 func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		newOrgResource,
 		newClientResource,
 		newBrandingResource,
 		newMailTemplateResource,

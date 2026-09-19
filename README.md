@@ -111,6 +111,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 | Resource | Manages | On destroy |
 | --- | --- | --- |
+| `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state — Latchkey has no org delete |
 | `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
@@ -123,6 +124,45 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).
+
+## The estate: creating orgs as code
+
+A second provider, configured with the **estate's** own credentials — a
+confidential client under the `latchkey` org that an estate owner has
+added over `POST /platform/estate/owners` — creates product orgs. Each
+arrives with its default `terraform` client, so the org's own provider
+can be configured from the same apply and nothing is ever clicked in
+the console:
+
+```hcl
+provider "latchkey" {
+  alias  = "estate"
+  issuer = "https://auth.latchkey.id"
+  org    = "latchkey"
+  # LATCHKEY_CLIENT_ID / LATCHKEY_CLIENT_SECRET: the estate's client
+}
+
+resource "latchkey_org" "wardroom" {
+  provider     = latchkey.estate
+  slug         = "wardroom"
+  display_name = "Wardroom"
+  owner_email  = "captain@wardroom.example"
+}
+
+provider "latchkey" {
+  alias         = "wardroom"
+  issuer        = "https://auth.latchkey.id"
+  org           = latchkey_org.wardroom.slug
+  client_id     = latchkey_org.wardroom.terraform_client_id
+  client_secret = latchkey_org.wardroom.terraform_client_secret
+}
+```
+
+`slug`, `display_name` and `owner_email` cannot change once created:
+Latchkey has no org rename or delete, and a plan that changes them is
+refused rather than pretending to replace an org that cannot be
+destroyed. Import an existing org by slug; the secret is shown once at
+creation and stays null after import.
 
 ## What stays in the console
 

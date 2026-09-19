@@ -406,6 +406,94 @@ func TestAccOrgSandbox(t *testing.T) {
 	})
 }
 
+// TestAccOrg: an org created through the estate arrives with its
+// default client's id and secret; the secret survives refresh (state
+// keeps it), import adopts the org without it, and the creation-time
+// attributes refuse to change rather than pretend to replace an org
+// that cannot be deleted.
+func TestAccOrg(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_org" "wardroom" {
+  slug         = "wardroom"
+  display_name = "Wardroom"
+  owner_email  = "Cap@Wardroom.test"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_org.wardroom", "id", "wardroom"),
+					resource.TestCheckResourceAttr("latchkey_org.wardroom", "slug", "wardroom"),
+					resource.TestCheckResourceAttr("latchkey_org.wardroom", "display_name", "Wardroom"),
+					resource.TestCheckResourceAttr("latchkey_org.wardroom", "owner_email", "Cap@Wardroom.test"),
+					resource.TestCheckResourceAttrSet("latchkey_org.wardroom", "owner_id"),
+					resource.TestCheckResourceAttrSet("latchkey_org.wardroom", "terraform_client_id"),
+					resource.TestCheckResourceAttrSet("latchkey_org.wardroom", "terraform_client_secret"),
+				),
+			},
+			{
+				// a second apply is a no-op: the secret stays in state
+				Config: `
+resource "latchkey_org" "wardroom" {
+  slug         = "wardroom"
+  display_name = "Wardroom"
+  owner_email  = "Cap@Wardroom.test"
+}`,
+				PlanOnly: true,
+			},
+			{
+				// creation-time attributes refuse to change
+				Config: `
+resource "latchkey_org" "wardroom" {
+  slug         = "wardroom"
+  display_name = "Wardroom Renamed"
+  owner_email  = "Cap@Wardroom.test"
+}`,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`fixed at creation`),
+			},
+			{
+				// import adopts the org by slug: everything but the secret
+				// (shown once) and the address's spelling (the service
+				// lowercases) round-trips
+				Config: `
+resource "latchkey_org" "wardroom" {
+  slug         = "wardroom"
+  display_name = "Wardroom"
+  owner_email  = "Cap@Wardroom.test"
+}`,
+				ResourceName:            "latchkey_org.wardroom",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"terraform_client_secret", "owner_email"},
+			},
+		},
+	})
+}
+
+// TestAccOrgSlug: a slug the service would have to lowercase is refused
+// up front — otherwise the normalized answer could never match config.
+func TestAccOrgSlug(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "latchkey_org" "bad" {
+  slug         = "Purser"
+  display_name = "Purser"
+  owner_email  = "cap@wardroom.test"
+}`,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`lowercase`),
+			},
+		},
+	})
+}
+
 func TestAccGrant(t *testing.T) {
 	testIssuer(t)
 	resource.Test(t, resource.TestCase{

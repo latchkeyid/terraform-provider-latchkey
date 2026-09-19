@@ -114,7 +114,14 @@ func (c *Client) bearer(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
+// do calls the org API: path is relative to /org/{org}.
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doAbs(ctx, method, "/org/"+c.Org+path, body, out)
+}
+
+// doAbs calls the issuer at an absolute path — the /platform surface
+// (the estate above orgs) is not org-scoped.
+func (c *Client) doAbs(ctx context.Context, method, path string, body any, out any) error {
 	tok, err := c.bearer(ctx)
 	if err != nil {
 		return err
@@ -127,7 +134,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 		rd = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.Issuer+"/org/"+c.Org+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, c.Issuer+path, rd)
 	if err != nil {
 		return err
 	}
@@ -812,4 +819,66 @@ func (c *Client) RevokeTenantKey(ctx context.Context, tenant, prefix string) err
 	return c.do(ctx, http.MethodPost, "/tenants/"+url.PathEscape(tenant)+"/keys/revoke", map[string]any{
 		"prefix": prefix,
 	}, nil)
+}
+
+// ---- estate (the account above orgs, latchkey gap 21) ----
+
+// EstateOrg is one org the estate created, as GET /platform/orgs lists
+// it: the live name and owner ride along from the org itself.
+type EstateOrg struct {
+	Slug              string `json:"slug"`
+	DisplayName       string `json:"display_name"`
+	OwnerID           string `json:"owner_id"`
+	OwnerEmail        string `json:"owner_email"`
+	TerraformClientID string `json:"terraform_client_id"`
+}
+
+// CreatedOrg is POST /platform/orgs's answer: the org, its owner, and the
+// default confidential `terraform` client's id and secret — the secret
+// exactly once.
+type CreatedOrg struct {
+	Slug                  string `json:"slug"`
+	DisplayName           string `json:"display_name"`
+	OwnerID               string `json:"owner_id"`
+	OwnerEmail            string `json:"owner_email"`
+	TerraformClientID     string `json:"terraform_client_id"`
+	TerraformClientSecret string `json:"terraform_client_secret"`
+}
+
+// CreateOrg creates a product org through the estate. The caller must
+// be an estate owner — the house's own machine client, not a product's.
+func (c *Client) CreateOrg(ctx context.Context, slug, displayName, ownerEmail string) (*CreatedOrg, error) {
+	var out CreatedOrg
+	if err := c.doAbs(ctx, http.MethodPost, "/platform/orgs", map[string]any{
+		"slug": slug, "display_name": displayName, "owner_email": ownerEmail,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// EstateOrgs lists the orgs the estate created.
+func (c *Client) EstateOrgs(ctx context.Context) ([]EstateOrg, error) {
+	var out struct {
+		Orgs []EstateOrg `json:"orgs"`
+	}
+	if err := c.doAbs(ctx, http.MethodGet, "/platform/orgs", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Orgs, nil
+}
+
+// GetEstateOrg finds one created org by slug; a nil result with nil
+// error means the estate does not list it.
+func (c *Client) GetEstateOrg(ctx context.Context, slug string) (*EstateOrg, error) {
+	orgs, err := c.EstateOrgs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range orgs {
+		if orgs[i].Slug == slug {
+			return &orgs[i], nil
+		}
+	}
+	return nil, nil
 }
