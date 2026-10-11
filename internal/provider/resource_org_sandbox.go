@@ -22,7 +22,7 @@ import (
 // production org's service client is authorized there through the same
 // implication (latchkey #78).
 //
-// Latchkey has no org delete: destroying this resource forgets the
+// Terraform never deletes an org: destroying this resource forgets the
 // sandbox from state and leaves it in place upstream.
 type orgSandboxResource struct {
 	api *latchkey.Client
@@ -42,7 +42,7 @@ func (r *orgSandboxResource) Metadata(_ context.Context, req resource.MetadataRe
 
 func (r *orgSandboxResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "The org's environment sandbox — a sibling org named {slug}-sandbox, isolated by construction, that production standing implies membership of. One per org; takes no arguments. Point a second provider alias at `slug` to manage its contents. Destroy only forgets it from state (Latchkey has no org delete).",
+		Description: "The org's environment sandbox — a sibling org named {slug}-sandbox, isolated by construction, that production standing implies membership of. One per org; takes no arguments. Point a second provider alias at `slug` to manage its contents. Destroy only forgets it from state (Terraform never deletes an org; the sandbox goes only with its production org, by a platform staff act).",
 		Attributes: map[string]schema.Attribute{
 			"id":   schema.StringAttribute{Computed: true, Description: "The sandbox org's slug."},
 			"slug": schema.StringAttribute{Computed: true, Description: "The sandbox org's slug ({org}-sandbox) — the `org` for a provider alias that manages its contents."},
@@ -103,7 +103,8 @@ func (r *orgSandboxResource) Update(ctx context.Context, req resource.UpdateRequ
 }
 
 func (r *orgSandboxResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	// Latchkey has no org delete: the sandbox stays; only state forgets it.
+	// Terraform never deletes an org: the sandbox stays; only state
+	// forgets it.
 	resp.Diagnostics.AddWarning("org sandbox left in place",
-		"Latchkey does not delete organizations; the sandbox org still exists upstream and re-adding this resource adopts it.")
+		"Terraform never deletes a Latchkey organization — a sandbox org goes only with its production org, by a platform staff act. The sandbox org still exists upstream and re-adding this resource adopts it.")
 }

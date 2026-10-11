@@ -108,8 +108,8 @@ func (r *orgResource) Configure(_ context.Context, req resource.ConfigureRequest
 	}
 }
 
-// ModifyPlan refuses a replacement outright: Delete cannot remove an
-// org, so "replace" would forget it and then fail to re-create the
+// ModifyPlan refuses a replacement outright: Delete never removes an
+// org (a staff act, not Terraform's), so "replace" would forget it and then fail to re-create the
 // same slug (409) — or, for a slug change, silently strand the old org.
 // Say so at plan time instead.
 func (r *orgResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -202,9 +202,12 @@ func (r *orgResource) Update(ctx context.Context, req resource.UpdateRequest, re
 }
 
 func (r *orgResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	// Latchkey has no org delete: the org stays; only state forgets it.
+	// Terraform never deletes an org: deleting one is a platform staff
+	// act outside desired state (Latchkey ADR 011, owner decision 3), and
+	// the estate's client is refused it. The org stays; only state
+	// forgets it.
 	resp.Diagnostics.AddWarning("organization left in place",
-		"Latchkey does not delete organizations; the org still exists upstream and importing this resource by slug adopts it (without the client secret).")
+		"Terraform never deletes a Latchkey organization — deleting one is a platform staff act (POST /platform/orgs/{slug}/delete). The org still exists upstream and importing this resource by slug adopts it (without the client secret).")
 }
 
 func (r *orgResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

@@ -111,12 +111,12 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 | Resource | Manages | On destroy |
 | --- | --- | --- |
-| `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state — Latchkey has no org delete |
+| `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
 | `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
-| `latchkey_org_sandbox` | The org's environment sandbox (`{org}-sandbox`, one per org, no arguments); manage its contents with a provider alias on `slug` | Forgets it from state — Latchkey has no org delete |
+| `latchkey_org_sandbox` | The org's environment sandbox (`{org}-sandbox`, one per org, no arguments); manage its contents with a provider alias on `slug` | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
 | `latchkey_github_signin` | Continue with GitHub on the hosted sign-in pages: `mode` `platform` (borrow Latchkey's OAuth app) or `custom` (`client_id` + sensitive `client_secret`, write-only) | Removes the button |
