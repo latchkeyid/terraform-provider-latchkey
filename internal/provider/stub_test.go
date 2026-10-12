@@ -115,8 +115,36 @@ type stubState struct {
 	identities map[string]string       // email → identity id
 	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
 	webhooks   map[string]*stubWebhook // url
-	sandbox    bool                    // the org's {slug}-sandbox sibling has been minted
+	sandboxes  map[string]string       // the org's named sandboxes: name → slug ({org}-{name})
 	orgs       map[string]*stubOrg     // the estate's created orgs, by slug
+	// ADR 012: the house org's tenants an org binds to, by key; the
+	// bound-only invariant (slice 5); and whether the stub's credential
+	// is platform staff (the production estate client is: tagged "*")
+	houseTenants   map[string]*stubHouseTenant
+	tenantRequired bool
+	notStaff       bool
+	houseSeq       int
+}
+
+// stubHouseTenant is a tenant of the house (anythink) org: legacy ones
+// are keyed by slug with a ref of their own, new ones by their ref.
+type stubHouseTenant struct {
+	Key         string
+	Ref         string
+	Slug        string
+	DisplayName string
+	Admins      map[string]bool // emails
+}
+
+func (t *stubHouseTenant) view(boundAt string) map[string]any {
+	out := map[string]any{"key": t.Key, "slug": t.Slug, "display_name": t.DisplayName, "products": []string{"latchkey"}}
+	if t.Ref != "" {
+		out["ref"] = t.Ref
+	}
+	if boundAt != "" {
+		out["bound_at"] = boundAt
+	}
+	return out
 }
 
 // stubOrg is an org the estate created (POST /platform/orgs): the live
@@ -127,6 +155,8 @@ type stubOrg struct {
 	OwnerID           string `json:"owner_id"`
 	OwnerEmail        string `json:"owner_email"`
 	TerraformClientID string `json:"terraform_client_id"`
+	Tenant            string `json:"-"` // the bound house tenant's key
+	BoundAt           string `json:"-"`
 }
 
 type stubWebhook struct {
@@ -164,6 +194,14 @@ func newStub(org string) *httptest.Server {
 		tgrants:    map[string]*stubTGrant{},
 		webhooks:   map[string]*stubWebhook{},
 		orgs:       map[string]*stubOrg{},
+		sandboxes:  map[string]string{},
+		houseTenants: map[string]*stubHouseTenant{
+			// production-shaped: grapevine keyed by its legacy slug with a
+			// ref of its own; inflow keyed by its ref
+			"grapevine":            {Key: "grapevine", Ref: "plygmjohrbtnkxnlsehy", Slug: "grapevine", DisplayName: "Grapevine", Admins: map[string]bool{"cap@wardroom.test": true}},
+			"csqhdrjodfiqlglgqoay": {Key: "csqhdrjodfiqlglgqoay", Ref: "csqhdrjodfiqlglgqoay", Slug: "inflow", DisplayName: "Inflow", Admins: map[string]bool{"cap@wardroom.test": true}},
+			"optrader":             {Key: "optrader", Ref: "uuhtvzhkwxnegzvtimuu", Slug: "optrader", DisplayName: "Optrader", Admins: map[string]bool{"someone@else.test": true}},
+		},
 	}
 	mux := http.NewServeMux()
 	prefix := "/org/" + org
@@ -249,15 +287,137 @@ func newStub(org string) *httptest.Server {
 			"github_app_id":           s.github["app_id"],
 			"github_app_configured":   s.github["app_id"] != "" && s.github["app_key"] != "",
 		}
-		if s.sandbox {
-			out["sandbox"] = org + "-sandbox"
+		if sb, ok := s.sandboxes["sandbox"]; ok {
+			out["sandbox"] = sb
 		}
 		json.NewEncoder(w).Encode(out)
 	}))
-	// the org sandbox: convergent claim of {slug}-sandbox
+	// named sandboxes (ADR 012 slice 2): {org}-{name}, convergent create;
+	// POST …/sandbox is the create with name "sandbox"
+	sandboxNameRe := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,18}[a-z0-9])?$`)
+	sandboxView := func(name string) map[string]string {
+		slug := s.sandboxes[name]
+		return map[string]string{"name": name, "slug": slug, "key": "key-" + slug, "display_name": "Stub Org (" + name + ")"}
+	}
+	createSandbox := func(w http.ResponseWriter, name string) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if !sandboxNameRe.MatchString(name) {
+			oops(w, http.StatusBadRequest, "a sandbox name is 1–20 characters: a–z, 0–9, hyphens (not at the ends)")
+			return
+		}
+		if _, ok := s.sandboxes[name]; !ok {
+			s.sandboxes[name] = org + "-" + name
+		}
+		out := map[string]string{"status": "created", "sandbox_of": org}
+		for k, v := range sandboxView(name) {
+			out[k] = v
+		}
+		json.NewEncoder(w).Encode(out)
+	}
 	mux.HandleFunc("POST "+prefix+"/sandbox", authed(func(w http.ResponseWriter, r *http.Request) {
-		s.sandbox = true
-		json.NewEncoder(w).Encode(map[string]string{"status": "created", "slug": org + "-sandbox", "sandbox_of": org})
+		createSandbox(w, "sandbox")
+	}))
+	mux.HandleFunc("POST "+prefix+"/sandboxes", authed(func(w http.ResponseWriter, r *http.Request) {
+		createSandbox(w, str(body(r), "name"))
+	}))
+	mux.HandleFunc("GET "+prefix+"/sandboxes", authed(func(w http.ResponseWriter, r *http.Request) {
+		names := slices.Sorted(func(yield func(string) bool) {
+			for n := range s.sandboxes {
+				if !yield(n) {
+					return
+				}
+			}
+		})
+		items := []map[string]string{}
+		for _, n := range names {
+			items = append(items, sandboxView(n))
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items})
+	}))
+	mux.HandleFunc("POST "+prefix+"/sandboxes/{name}/delete", authed(func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		slug, ok := s.sandboxes[name]
+		if !ok {
+			oops(w, http.StatusNotFound, "no sandbox named "+name)
+			return
+		}
+		if str(body(r), "confirm") != slug {
+			oops(w, http.StatusBadRequest, "confirm must repeat the sandbox's slug \""+slug+"\"")
+			return
+		}
+		delete(s.sandboxes, name)
+		json.NewEncoder(w).Encode(map[string]any{"status": "deleted", "name": name, "slug": slug, "slug_released": true})
+	}))
+
+	// test levers, stub-only: the bound-only invariant (ADR 012 slice 5)
+	// and an estate credential without platform staff standing
+	mux.HandleFunc("POST /stub/tenant-required", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.tenantRequired = r.URL.Query().Get("on") != "0"
+	})
+	mux.HandleFunc("POST /stub/not-staff", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.notStaff = r.URL.Query().Get("on") != "0"
+	})
+	// a house tenant by key, ref or slug (the live resolver's order)
+	houseTenant := func(name string) *stubHouseTenant {
+		name = strings.TrimSpace(name)
+		if t, ok := s.houseTenants[name]; ok {
+			return t
+		}
+		for _, t := range s.houseTenants {
+			if t.Ref == name || t.Slug == name {
+				return t
+			}
+		}
+		return nil
+	}
+	boundView := func(o *stubOrg) any {
+		if o.Tenant == "" {
+			return nil
+		}
+		return s.houseTenants[o.Tenant].view(o.BoundAt)
+	}
+	// another org's GET /org/{slug}, as the estate's staff client reads
+	// it: only the ADR 012 tenant view matters here
+	mux.HandleFunc("GET /org/{slug}", authed(func(w http.ResponseWriter, r *http.Request) {
+		o, ok := s.orgs[r.PathValue("slug")]
+		if !ok {
+			oops(w, http.StatusNotFound, "unknown organization")
+			return
+		}
+		if s.notStaff {
+			oops(w, http.StatusForbidden, "you are not a member of \""+o.Slug+"\"")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"slug": o.Slug, "display_name": o.DisplayName, "kind": "production", "tenant": boundView(o)})
+	}))
+	mux.HandleFunc("POST /org/{slug}/bind-tenant", authed(func(w http.ResponseWriter, r *http.Request) {
+		o, ok := s.orgs[r.PathValue("slug")]
+		if !ok {
+			oops(w, http.StatusNotFound, "unknown organization")
+			return
+		}
+		if s.notStaff {
+			oops(w, http.StatusForbidden, "only the organization's owner or platform staff can bind it to a tenant")
+			return
+		}
+		t := houseTenant(str(body(r), "tenant"))
+		if t == nil {
+			oops(w, http.StatusNotFound, "no tenant under the house organization")
+			return
+		}
+		status := "bound"
+		switch {
+		case o.Tenant == t.Key:
+			status = "unchanged"
+		case o.Tenant != "":
+			status = "rebound" // staff only — the stub's credential is staff
+		}
+		o.Tenant, o.BoundAt = t.Key, "2026-10-12T00:00:00Z"
+		json.NewEncoder(w).Encode(map[string]any{"status": status, "org": map[string]string{"slug": o.Slug}, "tenant": t.view("")})
 	}))
 
 	// the estate (gap 21): orgs created by API, each with a default
@@ -292,12 +452,56 @@ func newStub(org string) *httptest.Server {
 			oops(w, http.StatusConflict, "organization "+slug+" already exists")
 			return
 		}
+		tname := strings.TrimSpace(str(b, "tenant"))
+		nt, hasNew := b["new_tenant"].(map[string]any)
+		if tname != "" && hasNew {
+			oops(w, http.StatusBadRequest, "tenant and new_tenant are exclusive")
+			return
+		}
+		if tname == "" && !hasNew && s.tenantRequired {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"error": "an organization is created on an anythink tenant: name one you administer, or a new one (POST /orgs {tenant | new_tenant}; POST /platform/orgs {tenant | new_tenant})", "tenant_required": true})
+			return
+		}
+		var bound *stubHouseTenant
+		switch {
+		case tname != "":
+			if bound = houseTenant(tname); bound == nil {
+				oops(w, http.StatusNotFound, "no tenant "+tname+" under the house organization")
+				return
+			}
+			if !bound.Admins[email] {
+				oops(w, http.StatusForbidden, email+" is not an admin of tenant \""+bound.Slug+"\" — an organization's owner administers its tenant")
+				return
+			}
+		case hasNew:
+			name := strings.TrimSpace(str(nt, "display_name"))
+			if name == "" {
+				name = strings.TrimSpace(str(b, "display_name"))
+			}
+			tslug := strings.TrimSpace(str(nt, "slug"))
+			if tslug == "" {
+				tslug = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+			}
+			if houseTenant(tslug) != nil {
+				oops(w, http.StatusConflict, "tenant slug "+tslug+" is taken")
+				return
+			}
+			s.houseSeq++
+			ref := fmt.Sprintf("newtenantref%08d", s.houseSeq)
+			bound = &stubHouseTenant{Key: ref, Ref: ref, Slug: tslug, DisplayName: name, Admins: map[string]bool{email: true}}
+			s.houseTenants[ref] = bound
+		}
 		o := &stubOrg{
 			Slug: slug, DisplayName: strings.TrimSpace(str(b, "display_name")),
 			OwnerID: identity(email), OwnerEmail: email, TerraformClientID: uuid.NewString(),
 		}
+		if bound != nil {
+			o.Tenant, o.BoundAt = bound.Key, "2026-10-12T00:00:00Z"
+		}
 		s.orgs[slug] = o
 		json.NewEncoder(w).Encode(map[string]any{
+			"tenant": boundView(o),
 			"status": "created", "slug": o.Slug, "display_name": o.DisplayName,
 			"owner_id": o.OwnerID, "owner_email": o.OwnerEmail,
 			"terraform_client_id": o.TerraformClientID, "terraform_client_secret": "stub-" + uuid.NewString(),

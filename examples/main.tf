@@ -65,3 +65,9 @@ resource "latchkey_api_key" "storefront" {
   browser         = true
   allowed_origins = ["https://app.acme.test", "https://*.acme.test"]
 }
+
+# A named environment sandbox (acme-staging); omit `name` for acme-sandbox.
+# Destroy deletes the sandbox org — a sandbox is disposable.
+resource "latchkey_org_sandbox" "staging" {
+  name = "staging"
+}
