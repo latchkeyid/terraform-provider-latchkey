@@ -86,9 +86,14 @@ resource "latchkey_webhook" "product" {
   events = ["invitation.*", "membership.set"]
 }
 
-# The org's environment sandbox (acme-sandbox), and its contents through a
-# second provider alias — production's service client is authorized there.
+# The org's environment sandboxes — acme-sandbox (the default name) and
+# acme-staging — and their contents through a second provider alias:
+# production's service client is authorized there. Destroy deletes one.
 resource "latchkey_org_sandbox" "env" {}
+
+resource "latchkey_org_sandbox" "staging" {
+  name = "staging"
+}
 
 provider "latchkey" {
   alias  = "sandbox"
@@ -111,12 +116,12 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 
 | Resource | Manages | On destroy |
 | --- | --- | --- |
-| `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
+| `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation, and its anythink tenant: `tenant` (an existing house tenant the owner administers — key, ref or slug) or `new_tenant` (create one), read back into `tenant_key` / `tenant_ref` / `tenant_slug`. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
 | `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |
-| `latchkey_org_sandbox` | The org's environment sandbox (`{org}-sandbox`, one per org, no arguments); manage its contents with a provider alias on `slug` | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
+| `latchkey_org_sandbox` | One of the org's named environment sandboxes (`{org}-{name}`; `name` defaults to `sandbox`, the one sandbox an org had before names); manage its contents with a provider alias on `slug` | **Deletes** the sandbox org and everything in it (a sandbox is disposable) |
 | `latchkey_grant` | One identity's membership in the org | Revokes the membership |
 | `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
 | `latchkey_github_signin` | Continue with GitHub on the hosted sign-in pages: `mode` `platform` (borrow Latchkey's OAuth app) or `custom` (`client_id` + sensitive `client_secret`, write-only) | Removes the button |
@@ -163,6 +168,34 @@ Latchkey has no org rename or delete, and a plan that changes them is
 refused rather than pretending to replace an org that cannot be
 destroyed. Import an existing org by slug; the secret is shown once at
 creation and stays null after import.
+
+### Orgs follow anythink tenants (ADR 012)
+
+Every production org is **bound** to one tenant of the house
+(anythink) org — the customer it serves; the tenant's admins are the
+org's owners. Name the tenant at creation:
+
+```hcl
+resource "latchkey_org" "wardroom" {
+  provider     = latchkey.estate
+  slug         = "wardroom"
+  display_name = "Wardroom"
+  owner_email  = "captain@wardroom.example"
+  tenant       = "plygmjohrbtnkxnlsehy" # key, ref or slug; the owner administers it
+  # or: new_tenant = { display_name = "Wardroom" } — created first, the owner its admin
+}
+```
+
+`tenant` and `new_tenant` are exclusive. Once Latchkey enforces bound
+orgs, a create naming neither is refused with a diagnostic saying so.
+`tenant` keeps the spelling you wrote: a ref or slug that resolves to
+the bound tenant plans nothing (`tenant_key` holds the key). Setting
+`tenant` on an org created unbound binds it in place (the provider's
+credentials must be the owner's or platform staff's — the estate's
+`*`-tagged client is staff); changing it on a bound org is refused at
+plan time, because a rebind is a platform staff act, never a
+replacement. `new_tenant` is read only at creation. Import reads the
+binding into `tenant_key`.
 
 ## What stays in the console
 

@@ -45,10 +45,21 @@ func New(issuer, org, clientID, clientSecret string) *Client {
 type APIError struct {
 	Status  int
 	Message string
+	// TenantRequired is the 400 `tenant_required: true` a create answers
+	// once Latchkey's bound-only invariant is on (ADR 012 slice 5): a new
+	// production org must name an anythink tenant.
+	TenantRequired bool
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("latchkey: %d %s", e.Status, e.Message)
+}
+
+// AsAPIError unwraps err to the org API's error, if it is one.
+func AsAPIError(err error) (*APIError, bool) {
+	var api *APIError
+	ok := asAPIError(err, &api)
+	return api, ok
 }
 
 // IsNotFound reports a 404 — resources use it to detect drift-deletion.
@@ -150,13 +161,14 @@ func (c *Client) doAbs(ctx context.Context, method, path string, body any, out a
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var e struct {
-			Error string `json:"error"`
+			Error          string `json:"error"`
+			TenantRequired bool   `json:"tenant_required"`
 		}
 		json.Unmarshal(raw, &e)
 		if e.Error == "" {
 			e.Error = strings.TrimSpace(string(raw))
 		}
-		return &APIError{Status: resp.StatusCode, Message: e.Error}
+		return &APIError{Status: resp.StatusCode, Message: e.Error, TenantRequired: e.TenantRequired}
 	}
 	if out != nil {
 		return json.Unmarshal(raw, out)
@@ -245,6 +257,43 @@ func (c *Client) CreateSandbox(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return out.Slug, nil
+}
+
+// Sandbox is one named sandbox org of a production org (ADR 012 slice 2):
+// slugged {org}-{name}, a real org of its own.
+type Sandbox struct {
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Key         string `json:"key"`
+	Ref         string `json:"ref"`
+	DisplayName string `json:"display_name"`
+}
+
+// CreateNamedSandbox mints (or converges on) the sandbox called name:
+// POST /org/{slug}/sandboxes {name}.
+func (c *Client) CreateNamedSandbox(ctx context.Context, name string) (*Sandbox, error) {
+	var out Sandbox
+	if err := c.do(ctx, http.MethodPost, "/sandboxes", map[string]string{"name": name}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Sandboxes lists the org's live sandboxes, by name.
+func (c *Client) Sandboxes(ctx context.Context) ([]Sandbox, error) {
+	var out struct {
+		Items []Sandbox `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/sandboxes", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// DeleteSandbox deletes one sandbox org for good — its tenants, clients
+// and members with it. confirm repeats the sandbox's slug.
+func (c *Client) DeleteSandbox(ctx context.Context, name, slug string) error {
+	return c.do(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(name)+"/delete", map[string]string{"confirm": slug}, nil)
 }
 
 // ---- clients ----
@@ -837,24 +886,77 @@ type EstateOrg struct {
 // default confidential `terraform` client's id and secret — the secret
 // exactly once.
 type CreatedOrg struct {
-	Slug                  string `json:"slug"`
-	DisplayName           string `json:"display_name"`
-	OwnerID               string `json:"owner_id"`
-	OwnerEmail            string `json:"owner_email"`
-	TerraformClientID     string `json:"terraform_client_id"`
-	TerraformClientSecret string `json:"terraform_client_secret"`
+	Tenant                *BoundTenant `json:"tenant"`
+	Slug                  string       `json:"slug"`
+	DisplayName           string       `json:"display_name"`
+	OwnerID               string       `json:"owner_id"`
+	OwnerEmail            string       `json:"owner_email"`
+	TerraformClientID     string       `json:"terraform_client_id"`
+	TerraformClientSecret string       `json:"terraform_client_secret"`
+}
+
+// NewTenant asks POST /platform/orgs to create the org's anythink
+// tenant first, with the owner its admin (ADR 012 slice 4). Both fields
+// are optional: the server names it after the org.
+type NewTenant struct {
+	DisplayName string `json:"display_name,omitempty"`
+	Slug        string `json:"slug,omitempty"`
+}
+
+// BoundTenant is the anythink (house) tenant an org is bound to, as GET
+// /org/{slug}, POST /platform/orgs and bind-tenant answer it.
+type BoundTenant struct {
+	Key         string `json:"key"`
+	Ref         string `json:"ref"`
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+	BoundAt     string `json:"bound_at"`
 }
 
 // CreateOrg creates a product org through the estate. The caller must
 // be an estate owner — the house's own machine client, not a product's.
-func (c *Client) CreateOrg(ctx context.Context, slug, displayName, ownerEmail string) (*CreatedOrg, error) {
+// tenant (a house tenant's key, ref or slug, administered by the owner)
+// and newTenant are exclusive; with neither, the org is born unbound —
+// refused (400 tenant_required) once the bound-only invariant is on.
+func (c *Client) CreateOrg(ctx context.Context, slug, displayName, ownerEmail, tenant string, newTenant *NewTenant) (*CreatedOrg, error) {
+	body := map[string]any{"slug": slug, "display_name": displayName, "owner_email": ownerEmail}
+	if tenant != "" {
+		body["tenant"] = tenant
+	}
+	if newTenant != nil {
+		body["new_tenant"] = newTenant
+	}
 	var out CreatedOrg
-	if err := c.doAbs(ctx, http.MethodPost, "/platform/orgs", map[string]any{
-		"slug": slug, "display_name": displayName, "owner_email": ownerEmail,
-	}, &out); err != nil {
+	if err := c.doAbs(ctx, http.MethodPost, "/platform/orgs", body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// OrgTenant reads the tenant another org (by slug) is bound to from GET
+// /org/{slug}: nil when unbound. The caller needs standing on that org —
+// the estate's client has it as platform staff (tagged "*").
+func (c *Client) OrgTenant(ctx context.Context, slug string) (*BoundTenant, error) {
+	var out struct {
+		Tenant *BoundTenant `json:"tenant"`
+	}
+	if err := c.doAbs(ctx, http.MethodGet, "/org/"+url.PathEscape(slug), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Tenant, nil
+}
+
+// BindOrgTenant binds an org to a house tenant: POST /org/{slug}/bind-tenant.
+// The org's owner who administers the tenant, or platform staff; a
+// second bind to the same tenant converges, a rebind is staff's.
+func (c *Client) BindOrgTenant(ctx context.Context, slug, tenant string) (*BoundTenant, error) {
+	var out struct {
+		Tenant *BoundTenant `json:"tenant"`
+	}
+	if err := c.doAbs(ctx, http.MethodPost, "/org/"+url.PathEscape(slug)+"/bind-tenant", map[string]string{"tenant": tenant}, &out); err != nil {
+		return nil, err
+	}
+	return out.Tenant, nil
 }
 
 // EstateOrgs lists the orgs the estate created.

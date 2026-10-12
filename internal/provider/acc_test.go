@@ -1,14 +1,20 @@
 package provider
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"github.com/latchkeyid/terraform-provider-latchkey/internal/latchkey"
 )
 
 // Acceptance tests drive the real terraform CLI against the stub org API
@@ -384,17 +390,24 @@ resource "latchkey_auth_domain" "main" {
 	})
 }
 
+// TestAccOrgSandbox: named sandboxes (ADR 012 slice 2). The default
+// name is "sandbox" ({org}-sandbox, the one sandbox from before names);
+// a custom name is {org}-{name}; both converge, import by name, and
+// destroy deletes the sandbox org.
 func TestAccOrgSandbox(t *testing.T) {
 	testIssuer(t)
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             checkNoSandboxes,
 		Steps: []resource.TestStep{
 			{
 				Config: `resource "latchkey_org_sandbox" "env" {}`,
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "id", "acme-sandbox"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "name", "sandbox"),
 					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "slug", "acme-sandbox"),
 					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "sandbox_of", "acme"),
+					resource.TestCheckResourceAttrSet("latchkey_org_sandbox.env", "key"),
 				),
 			},
 			{
@@ -402,8 +415,84 @@ func TestAccOrgSandbox(t *testing.T) {
 				Config:   `resource "latchkey_org_sandbox" "env" {}`,
 				PlanOnly: true,
 			},
+			{
+				Config: `
+resource "latchkey_org_sandbox" "env" {}
+resource "latchkey_org_sandbox" "staging" {
+  name = "staging"
+}`,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.staging", "id", "acme-staging"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.staging", "name", "staging"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.staging", "slug", "acme-staging"),
+					resource.TestCheckResourceAttr("latchkey_org_sandbox.env", "slug", "acme-sandbox"),
+				),
+			},
+			{
+				ResourceName:      "latchkey_org_sandbox.staging",
+				ImportState:       true,
+				ImportStateId:     "staging",
+				ImportStateVerify: true,
+			},
+			{
+				// removing one deletes that sandbox and leaves the other
+				Config: `resource "latchkey_org_sandbox" "env" {}`,
+				Check: func(*terraform.State) error {
+					names, err := sandboxNames()
+					if err != nil {
+						return err
+					}
+					if !slices.Equal(names, []string{"sandbox"}) {
+						return fmt.Errorf("sandboxes after removing staging: %v", names)
+					}
+					return nil
+				},
+			},
 		},
 	})
+}
+
+// TestAccOrgSandboxName: a name the service would lowercase is refused
+// up front, like an org slug.
+func TestAccOrgSandboxName(t *testing.T) {
+	testIssuer(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config:      `resource "latchkey_org_sandbox" "bad" { name = "Preview" }`,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`lowercase`),
+			},
+		},
+	})
+}
+
+func testAPI() *latchkey.Client {
+	return latchkey.New(os.Getenv("LATCHKEY_ISSUER"), os.Getenv("LATCHKEY_ORG"), os.Getenv("LATCHKEY_CLIENT_ID"), os.Getenv("LATCHKEY_CLIENT_SECRET"))
+}
+
+func sandboxNames() ([]string, error) {
+	items, err := testAPI().Sandboxes(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, i := range items {
+		names = append(names, i.Name)
+	}
+	return names, nil
+}
+
+func checkNoSandboxes(*terraform.State) error {
+	names, err := sandboxNames()
+	if err != nil {
+		return err
+	}
+	if len(names) != 0 {
+		return fmt.Errorf("destroy left sandboxes: %v", names)
+	}
+	return nil
 }
 
 // TestAccOrg: an org created through the estate arrives with its
