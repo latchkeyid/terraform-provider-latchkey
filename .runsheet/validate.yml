@@ -1,0 +1,21 @@
+# The checks test.yml's `test` job ran (ADR 032). Neither job was
+# path-filtered, so no suite declares `paths`.
+#
+# internal/provider/acc_test.go and org_tenant_test.go's TestAcc* cases
+# are written to gate on LATCHKEY_ISSUER, but `testIssuer` (acc_test.go)
+# provisions its own in-process stub issuer and forces TF_ACC=1 whenever
+# LATCHKEY_ISSUER is unset, so with no credential set — as in CI and in
+# this sandbox — the unit suite below runs them against that stub, not
+# against a live Latchkey tenant, rather than skipping them. The one
+# case that actually skips for lack of a credential is the reverse of
+# that: org_tenant_test.go's `stubOnly` tests skip when a real
+# LATCHKEY_ISSUER *is* set, because they drive the stub's own
+# house-tenant levers. No real Latchkey credential is used, set, or
+# faked by this suite.
+suites:
+  - name: lint
+    kind: lint
+    command: go vet ./...
+  - name: unit
+    kind: unit
+    command: go test ./... -v
