@@ -61,6 +61,13 @@ resource "latchkey_client" "backend" {
     subject   = true # may replace `sub` — the shape the trust policy matches
     ttl       = 3600 # ceiling; expires_in may shorten per token
   }
+
+  # The product this backend is (Latchkey ADR 016): its client_credentials
+  # tokens carry `product` and `client_id` and no org-level `ns` key, so
+  # another product never reads it as staff. Only the org's owner or staff
+  # may change it — apply as the owner (`terraform login`). "" clears it;
+  # omit it to leave the client's product unmanaged.
+  product = "acme-api"
 }
 
 resource "latchkey_branding" "this" {
@@ -151,7 +158,7 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | Resource | Manages | On destroy |
 | --- | --- | --- |
 | `latchkey_org` | **Estate-level:** a product organization created through the estate (the account above orgs) — `slug`, `display_name`, `owner_email`, all fixed at creation, and its anythink tenant: `tenant` (an existing house tenant the owner administers — key, ref or slug) or `new_tenant` (create one), read back into `tenant_key` / `tenant_ref` / `tenant_slug`. Born claimed, owned, and holding a confidential `terraform` client whose `terraform_client_id` + sensitive `terraform_client_secret` (returned once) configure a provider on the new org. Needs estate-owner credentials (the house's client under the `latchkey` org), not a product's | Forgets it from state, with a warning — Terraform never deletes an org (a platform staff act) |
-| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling), its `review_login` (the reviewer email/phone and test-identity domain that sign in with a fixed code) and, for a confidential client, its RFC 8693 `exchange` allow-list (audiences, claim names, subject override, TTL ceiling) | Disables — client ids are never reused |
+| `latchkey_client` | An OIDC client and its flags (redirect URIs, phone, captcha, attestation, OTP ceiling), its `review_login` (the reviewer email/phone and test-identity domain that sign in with a fixed code) and, for a confidential client, its RFC 8693 `exchange` allow-list (audiences, claim names, subject override, TTL ceiling) and its `product` (the product the client is — its client_credentials tokens then carry `product` and `client_id` and no org-level `ns` key; owner or staff only, so apply it as the owner) | Disables — client ids are never reused |
 | `latchkey_branding` | Hosted-page dress: logo URL, colours, tagline, backdrop style | Restores the plain default card |
 | `latchkey_mail_template` | Per-org email copy (plaintext + optional HTML part) for one kind: `login`, `login_code`, `invite`, `link_email` or `tenant_invite` (the tenant invitation email) | Restores the default copy |
 | `latchkey_auth_domain` | A product-branded issuer host | Releases the claim |

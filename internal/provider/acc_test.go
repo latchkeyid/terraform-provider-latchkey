@@ -218,6 +218,46 @@ resource "latchkey_client" "backend" {
 	})
 }
 
+// TestAccClientProduct: `product` names the product a confidential client
+// is (Latchkey ADR 016), changes in place, clears with "", and — omitted —
+// is left unmanaged rather than cleared.
+func TestAccClientProduct(t *testing.T) {
+	testIssuer(t)
+	backend := func(product string) string {
+		return `
+resource "latchkey_client" "backend" {
+  name   = "acme-backend"
+  public = false
+  secret = "s3cret"
+` + product + `
+}`
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{
+			{
+				Config: backend(`  product = "acme-api"`),
+				Check:  resource.TestCheckResourceAttr("latchkey_client.backend", "product", "acme-api"),
+			},
+			{
+				// in place: another product
+				Config: backend(`  product = "acme-worker"`),
+				Check:  resource.TestCheckResourceAttr("latchkey_client.backend", "product", "acme-worker"),
+			},
+			{
+				// "" clears it
+				Config: backend(`  product = ""`),
+				Check:  resource.TestCheckResourceAttr("latchkey_client.backend", "product", ""),
+			},
+			{
+				// omitted: unmanaged, absent from state, no diff
+				Config: backend(""),
+				Check:  resource.TestCheckNoResourceAttr("latchkey_client.backend", "product"),
+			},
+		},
+	})
+}
+
 func TestAccBranding(t *testing.T) {
 	testIssuer(t)
 	resource.Test(t, resource.TestCase{
