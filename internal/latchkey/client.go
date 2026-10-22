@@ -319,6 +319,8 @@ type OidcClient struct {
 	ExchangeClaims    []string `json:"exchange_claims"`
 	ExchangeSubject   bool     `json:"exchange_subject"`
 	ExchangeTtl       int64    `json:"exchange_ttl"`
+	// the product this client is (Latchkey ADR 016); "" = none
+	Product string `json:"product"`
 }
 
 func (c *Client) Clients(ctx context.Context) ([]OidcClient, error) {
@@ -393,6 +395,13 @@ func (c *Client) SetClientExchange(ctx context.Context, id string, audiences, cl
 		"client_id": id, "exchange_audiences": audiences, "exchange_claims": claims,
 		"exchange_subject": subject, "exchange_ttl": ttl,
 	}, nil)
+}
+
+// SetClientProduct names the product this confidential client is (Latchkey
+// ADR 016); "" clears it. The org's owner or platform staff only — a
+// service client, the client itself included, is refused 403.
+func (c *Client) SetClientProduct(ctx context.Context, id, product string) error {
+	return c.do(ctx, http.MethodPost, "/clients/product", map[string]any{"client_id": id, "product": product}, nil)
 }
 
 // SetClientReviewLogin names the client's review sign-in: the one email

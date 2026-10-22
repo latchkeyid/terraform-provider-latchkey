@@ -46,6 +46,7 @@ type clientModel struct {
 	OtpDailyCeiling     types.Int64  `tfsdk:"otp_daily_ceiling"`
 	Exchange            types.Object `tfsdk:"exchange"`
 	ReviewLogin         types.Object `tfsdk:"review_login"`
+	Product             types.String `tfsdk:"product"`
 }
 
 // the review_login block: who signs in with the fixed code
@@ -155,6 +156,14 @@ func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 						Description: "Ceiling on a minted token's lifetime, seconds (60–86400); 0 = 1h. `expires_in` may shorten it per token, never lengthen.",
 					},
 				},
+			},
+			"product": schema.StringAttribute{
+				Optional: true,
+				Description: "The product this confidential client is — an opaque slug (lowercase letters, digits and dashes, " +
+					"e.g. `runsheet`). Its client_credentials tokens then carry `product` and `client_id` and no org-level `ns` key, " +
+					"so another product never reads this backend as staff (Latchkey ADR 016). Only the organization's owner or " +
+					"platform staff may change it: apply as the owner (`terraform login`), not as a service client. " +
+					"`\"\"` clears it; omitting the attribute leaves whatever the client has unmanaged. Refused on a public client.",
 			},
 			"review_login": schema.SingleNestedAttribute{
 				Optional: true,
@@ -369,6 +378,14 @@ func (r *clientResource) applySettings(ctx context.Context, id string, plan, pri
 			return err
 		}
 	}
+	// managed only when configured: a null product leaves the client's as
+	// it stands (the owner may have set it by hand), so a service-client
+	// apply that does not own the knob never trips the owner-only gate
+	if !plan.Product.IsNull() && !plan.Product.IsUnknown() && plan.Product.ValueString() != prior.Product.ValueString() {
+		if err := r.api.SetClientProduct(ctx, id, plan.Product.ValueString()); err != nil {
+			return err
+		}
+	}
 	// same shape: one endpoint, the server converges, a removed block clears
 	if !plan.ReviewLogin.Equal(prior.ReviewLogin) && !(plan.ReviewLogin.IsNull() && prior.ReviewLogin.IsNull()) {
 		email, phone, domain, code := reviewLoginArgs(ctx, plan.ReviewLogin)
@@ -403,6 +420,9 @@ func (r *clientResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.OtpDailyCeiling = types.Int64Value(c.OtpDailyCeiling)
 	state.Exchange = exchangeValue(ctx, c, state.Exchange)
 	state.ReviewLogin = reviewLoginValue(ctx, c, state.ReviewLogin)
+	if !state.Product.IsNull() {
+		state.Product = types.StringValue(c.Product)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 

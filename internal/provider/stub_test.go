@@ -40,6 +40,7 @@ type stubClient struct {
 	ExchangeClaims      []string `json:"exchange_claims"`
 	ExchangeSubject     bool     `json:"exchange_subject"`
 	ExchangeTtl         int64    `json:"exchange_ttl"`
+	Product             string   `json:"product"`
 }
 
 type stubTemplate struct {
@@ -577,6 +578,23 @@ func newStub(org string) *httptest.Server {
 		if len(c.ExchangeAudiences) == 0 {
 			c.ExchangeClaims, c.ExchangeSubject, c.ExchangeTtl = []string{}, false, 0
 		}
+	}))
+	mux.HandleFunc("POST "+prefix+"/clients/product", authed(func(w http.ResponseWriter, r *http.Request) {
+		b := body(r)
+		c, ok := s.clients[str(b, "client_id")]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "not this organization's client"})
+			return
+		}
+		product := strings.ToLower(strings.TrimSpace(str(b, "product")))
+		if product != "" && c.Public {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "a public client mints no token of its own — a product is for confidential clients"})
+			return
+		}
+		c.Product = product
+		json.NewEncoder(w).Encode(map[string]string{"client_id": c.ID, "product": c.Product})
 	}))
 	mux.HandleFunc("POST "+prefix+"/clients/redirect-uris", clientSetter(func(c *stubClient, b map[string]any) {
 		uris := []string{}
