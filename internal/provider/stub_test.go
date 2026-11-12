@@ -126,6 +126,7 @@ type stubState struct {
 	tenantRequired bool
 	notStaff       bool
 	houseSeq       int
+	tokenRequests  int // POST /oauth/token calls seen
 }
 
 // stubHouseTenant is a tenant of the house (anythink) org: legacy ones
@@ -210,6 +211,9 @@ func newStub(org string) *httptest.Server {
 	prefix := "/org/" + org
 
 	mux.HandleFunc("POST /oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.tokenRequests++
+		s.mu.Unlock()
 		r.ParseForm()
 		if r.PostFormValue("grant_type") != "client_credentials" || r.PostFormValue("client_secret") == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -354,6 +358,13 @@ func newStub(org string) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]any{"status": "deleted", "name": name, "slug": slug, "slug_released": true})
 	}))
 
+	// stub-only: how many times a client signed in at /oauth/token — a
+	// provider handed a token must never
+	mux.HandleFunc("GET /stub/token-requests", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]int{"count": s.tokenRequests})
+	})
 	// test levers, stub-only: the bound-only invariant (ADR 012 slice 5)
 	// and an estate credential without platform staff standing
 	mux.HandleFunc("POST /stub/tenant-required", func(w http.ResponseWriter, r *http.Request) {

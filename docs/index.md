@@ -152,7 +152,38 @@ resource "latchkey_webhook" "product" {
 ```
 
 Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
-`LATCHKEY_ORG`, `LATCHKEY_CLIENT_ID`, `LATCHKEY_CLIENT_SECRET`.
+`LATCHKEY_ORG`, `LATCHKEY_CLIENT_ID`, `LATCHKEY_CLIENT_SECRET`,
+`LATCHKEY_TOKEN`.
+
+### Authenticating with a token
+
+A caller that has already signed in to Latchkey — a workload holding a
+short-lived access token, with no client secret to give — hands the
+provider that token instead of a client:
+
+```hcl
+provider "latchkey" {
+  issuer = "https://auth.latchkey.id"
+  org    = "acme"
+  token  = var.latchkey_token # sensitive; or LATCHKEY_TOKEN
+}
+```
+
+- With a token, `client_id` and `client_secret` are not required, and
+  the provider never calls `/oauth/token`: the token is sent as it is.
+- **The provider does not renew the token.** It must stay valid until
+  the plan or apply finishes; one that expires midway fails the calls
+  after it, and the run must be started again with a fresh token.
+- `token` is exclusive with `client_id` and `client_secret`, from the
+  provider block or the environment. Setting both is a configuration
+  error — the provider does not guess which credential was meant.
+- The token can do what its holder can: Latchkey authorizes each call
+  as it would for that caller anywhere else.
+- `token` is sensitive, and the provider never puts it in a
+  diagnostic, a log line or an error.
+
+With no token, nothing changes: `client_id` and `client_secret` are
+required and the provider signs in with them.
 
 ## Resources
 

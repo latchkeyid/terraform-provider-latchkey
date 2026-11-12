@@ -24,6 +24,9 @@ type Client struct {
 
 	clientID     string
 	clientSecret string
+	// staticToken is a bearer the caller already holds (NewWithToken): it
+	// is sent as is and never renewed, and /oauth/token is never called.
+	staticToken string
 
 	http *http.Client
 
@@ -37,6 +40,18 @@ func New(issuer, org, clientID, clientSecret string) *Client {
 		Issuer: strings.TrimSuffix(issuer, "/"), Org: org,
 		clientID: clientID, clientSecret: clientSecret,
 		http: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// NewWithToken is a client that authenticates with a Latchkey access
+// token the caller obtained itself — a workload's short-lived token, say
+// — instead of a client secret. The token is not renewed: it must
+// outlive the work. It is never put in an error or a log line.
+func NewWithToken(issuer, org, token string) *Client {
+	return &Client{
+		Issuer: strings.TrimSuffix(issuer, "/"), Org: org,
+		staticToken: token,
+		http:        &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -87,6 +102,9 @@ func asAPIError(err error, target **APIError) bool {
 }
 
 func (c *Client) bearer(ctx context.Context) (string, error) {
+	if c.staticToken != "" {
+		return c.staticToken, nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != "" && time.Now().Before(c.expires) {
