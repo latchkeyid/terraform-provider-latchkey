@@ -1,7 +1,7 @@
 // Package provider implements the Terraform provider for Latchkey's org
 // API: declarative management of OIDC clients, membership grants, auth
-// domains, branding, mail templates, tenants, roles, teams and tenant
-// grants for one organization.
+// domains, branding, mail templates, tenants, roles, teams, tenant
+// grants and federation targets for one organization.
 package provider
 
 import (
@@ -127,6 +127,8 @@ func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource
 		newTeamMemberResource,
 		newTenantGrantResource,
 		newWebhookResource,
+		newFederationTargetResource,
+		newFederationTargetGrantResource,
 		newGithubSigninResource,
 		newGithubAppResource,
 	}

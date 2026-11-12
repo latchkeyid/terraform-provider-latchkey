@@ -113,11 +113,12 @@ type stubState struct {
 	tenants    map[string]*stubTenant
 	roles      map[string]*stubRole
 	teams      map[string]*stubTeam
-	identities map[string]string       // email → identity id
-	tgrants    map[string]*stubTGrant  // identity id + "|" + ns
-	webhooks   map[string]*stubWebhook // url
-	sandboxes  map[string]string       // the org's named sandboxes: name → slug ({org}-{name})
-	orgs       map[string]*stubOrg     // the estate's created orgs, by slug
+	identities map[string]string         // email → identity id
+	tgrants    map[string]*stubTGrant    // identity id + "|" + ns
+	webhooks   map[string]*stubWebhook   // url
+	sandboxes  map[string]string         // the org's named sandboxes: name → slug ({org}-{name})
+	orgs       map[string]*stubOrg       // the estate's created orgs, by slug
+	fedTargets map[string]*stubFedTarget // tenant | project | name (stub_federation_test.go)
 	// ADR 012: the house org's tenants an org binds to, by key; the
 	// bound-only invariant (slice 5); and whether the stub's credential
 	// is platform staff (the production estate client is: tagged "*")
@@ -195,6 +196,7 @@ func newStub(org string) *httptest.Server {
 		tgrants:    map[string]*stubTGrant{},
 		webhooks:   map[string]*stubWebhook{},
 		orgs:       map[string]*stubOrg{},
+		fedTargets: map[string]*stubFedTarget{},
 		sandboxes:  map[string]string{},
 		houseTenants: map[string]*stubHouseTenant{
 			// production-shaped: grapevine keyed by its legacy slug with a
@@ -265,6 +267,8 @@ func newStub(org string) *httptest.Server {
 		}
 		return t
 	}
+
+	s.federationRoutes(mux, org, authed)
 
 	mux.HandleFunc("GET "+prefix, authed(func(w http.ResponseWriter, r *http.Request) {
 		templates := []stubTemplate{}
