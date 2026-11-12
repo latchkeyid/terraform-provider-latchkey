@@ -24,6 +24,9 @@ type Client struct {
 
 	clientID     string
 	clientSecret string
+	// staticToken is a bearer the caller already holds (NewWithToken): it
+	// is sent as is and never renewed, and /oauth/token is never called.
+	staticToken string
 
 	http *http.Client
 
@@ -37,6 +40,18 @@ func New(issuer, org, clientID, clientSecret string) *Client {
 		Issuer: strings.TrimSuffix(issuer, "/"), Org: org,
 		clientID: clientID, clientSecret: clientSecret,
 		http: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// NewWithToken is a client that authenticates with a Latchkey access
+// token the caller obtained itself — a workload's short-lived token, say
+// — instead of a client secret. The token is not renewed: it must
+// outlive the work. It is never put in an error or a log line.
+func NewWithToken(issuer, org, token string) *Client {
+	return &Client{
+		Issuer: strings.TrimSuffix(issuer, "/"), Org: org,
+		staticToken: token,
+		http:        &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -87,6 +102,9 @@ func asAPIError(err error, target **APIError) bool {
 }
 
 func (c *Client) bearer(ctx context.Context) (string, error) {
+	if c.staticToken != "" {
+		return c.staticToken, nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != "" && time.Now().Before(c.expires) {
@@ -992,4 +1010,169 @@ func (c *Client) GetEstateOrg(ctx context.Context, slug string) (*EstateOrg, err
 		}
 	}
 	return nil, nil
+}
+
+// ---- federation targets ----
+
+// FederationTarget is a tenant's trust at a cloud for Latchkey's subject
+// tokens (Latchkey ADR 031 §3): a GCP workload identity provider and the
+// service account it may act as, an AWS role, an Azure federated
+// credential or a generic OIDC/STS. No field is secret, so every answer
+// carries the whole target, its grants and the trust setup to apply at
+// the cloud.
+type FederationTarget struct {
+	TargetRef   string `json:"target_ref"`
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Cloud       string `json:"cloud"`
+	// Audience is the aud a subject token carries: the target's own, else
+	// the cloud's default.
+	Audience string                  `json:"audience"`
+	Status   string                  `json:"status"`
+	GCP      *FederationGCP          `json:"gcp"`
+	AWS      *FederationAWS          `json:"aws"`
+	Azure    *FederationAzure        `json:"azure"`
+	OIDC     *FederationOIDC         `json:"oidc"`
+	Grants   []FederationTargetGrant `json:"grants"`
+	Setup    FederationSetup         `json:"setup"`
+}
+
+type FederationGCP struct {
+	WorkloadIdentityProvider string   `json:"workload_identity_provider"`
+	ServiceAccount           string   `json:"service_account"`
+	Scopes                   []string `json:"scopes"`
+}
+
+type FederationAWS struct {
+	RoleARN       string `json:"role_arn"`
+	Region        string `json:"region"`
+	SessionPolicy string `json:"session_policy"`
+	MaxDuration   int64  `json:"max_duration"`
+}
+
+type FederationAzure struct {
+	TenantID string   `json:"tenant_id"`
+	ClientID string   `json:"client_id"`
+	Scope    string   `json:"scope"`
+	Hosts    []string `json:"hosts"`
+}
+
+type FederationOIDC struct {
+	TokenURL string   `json:"token_url"`
+	Grant    string   `json:"grant"`
+	Hosts    []string `json:"hosts"`
+}
+
+// FederationSetup is what the tenant applies at its cloud to trust the
+// target's subject tokens. Only the GCP values are modelled: they are
+// what a google_iam_workload_identity_pool_provider and a
+// google_service_account_iam_member reference.
+type FederationSetup struct {
+	Issuer string `json:"issuer"`
+	GCP    *struct {
+		AttributeCondition string `json:"attribute_condition"`
+		Principal          string `json:"principal"`
+		PrincipalSet       string `json:"principal_set"`
+	} `json:"gcp"`
+}
+
+// FederationTargetGrant is one product's grant on a target: the purposes
+// it may mint for, the job kinds whose sessions may mint (none: the
+// product's own workload only; "*": every kind) and the environments
+// (none: any).
+type FederationTargetGrant struct {
+	Product      string   `json:"product"`
+	Purposes     []string `json:"purposes"`
+	Kinds        []string `json:"kinds"`
+	Environments []string `json:"environments"`
+	GrantedBy    string   `json:"granted_by"`
+}
+
+// FederationTargetInput is a PUT's body. The API keeps a nil label,
+// description or status; the provider always sends all three, so the
+// target is exactly what the configuration says. Exactly one of the
+// cloud blocks is set, the one Cloud names.
+type FederationTargetInput struct {
+	Cloud       string           `json:"cloud"`
+	Audience    string           `json:"audience"`
+	Label       *string          `json:"label,omitempty"`
+	Description *string          `json:"description,omitempty"`
+	Status      *string          `json:"status,omitempty"`
+	GCP         *FederationGCP   `json:"gcp,omitempty"`
+	AWS         *FederationAWS   `json:"aws,omitempty"`
+	Azure       *FederationAzure `json:"azure,omitempty"`
+	OIDC        *FederationOIDC  `json:"oidc,omitempty"`
+}
+
+// federationTargetPath is a target's route. The org is the caller's to
+// name (a resource may manage another org's tenant than the provider's
+// default), and project "" is a target of the whole tenant.
+func federationTargetPath(org, tenant, name, project, suffix string) string {
+	p := "/org/" + url.PathEscape(org) + "/tenants/" + url.PathEscape(tenant) + "/federation-targets/" + url.PathEscape(name) + suffix
+	if project != "" {
+		p += "?project=" + url.QueryEscape(project)
+	}
+	return p
+}
+
+// SetFederationTarget creates the target or replaces everything but its
+// grants; the same values again converge.
+func (c *Client) SetFederationTarget(ctx context.Context, org, tenant, name, project string, in FederationTargetInput) (*FederationTarget, error) {
+	var out FederationTarget
+	if err := c.doAbs(ctx, http.MethodPut, federationTargetPath(org, tenant, name, project, ""), in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetFederationTarget reads a target with its grants and trust setup;
+// NotFound when it was never set or was deleted.
+func (c *Client) GetFederationTarget(ctx context.Context, org, tenant, name, project string) (*FederationTarget, error) {
+	var out FederationTarget
+	if err := c.doAbs(ctx, http.MethodGet, federationTargetPath(org, tenant, name, project, ""), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteFederationTarget is final: the name stays taken, so a stale ref
+// never names a new trust.
+func (c *Client) DeleteFederationTarget(ctx context.Context, org, tenant, name, project string) error {
+	return c.doAbs(ctx, http.MethodDelete, federationTargetPath(org, tenant, name, project, ""), nil, nil)
+}
+
+// SetFederationTargetGrant replaces the product's grant on the target and
+// answers the target; the same grant again converges.
+func (c *Client) SetFederationTargetGrant(ctx context.Context, org, tenant, name, project, product string, purposes, kinds, environments []string) (*FederationTarget, error) {
+	nonNil := func(v []string) []string {
+		if v == nil {
+			return []string{}
+		}
+		return v
+	}
+	var out FederationTarget
+	if err := c.doAbs(ctx, http.MethodPut, federationTargetPath(org, tenant, name, project, "/grants/"+url.PathEscape(product)), map[string]any{
+		"purposes": nonNil(purposes), "kinds": nonNil(kinds), "environments": nonNil(environments),
+	}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RevokeFederationTargetGrant removes the product's grant; a product with
+// no grant converges.
+func (c *Client) RevokeFederationTargetGrant(ctx context.Context, org, tenant, name, project, product string) error {
+	return c.doAbs(ctx, http.MethodDelete, federationTargetPath(org, tenant, name, project, "/grants/"+url.PathEscape(product)), nil, nil)
+}
+
+// GrantFor is the product's grant on the target, nil for none.
+func (t *FederationTarget) GrantFor(product string) *FederationTargetGrant {
+	for i := range t.Grants {
+		if t.Grants[i].Product == product {
+			return &t.Grants[i]
+		}
+	}
+	return nil
 }

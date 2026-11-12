@@ -1,7 +1,7 @@
 // Package provider implements the Terraform provider for Latchkey's org
 // API: declarative management of OIDC clients, membership grants, auth
-// domains, branding, mail templates, tenants, roles, teams and tenant
-// grants for one organization.
+// domains, branding, mail templates, tenants, roles, teams, tenant
+// grants and federation targets for one organization.
 package provider
 
 import (
@@ -21,6 +21,8 @@ import (
 // service client via OAuth2 client_credentials — the same standing the
 // org API grants product backends, so Terraform can do exactly what the
 // org could do itself and nothing more.
+// A caller that already holds a Latchkey access token hands it over as
+// `token` instead, and no client signs in.
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
 		return &latchkeyProvider{version: version}
@@ -36,6 +38,7 @@ type providerModel struct {
 	Org          types.String `tfsdk:"org"`
 	ClientID     types.String `tfsdk:"client_id"`
 	ClientSecret types.String `tfsdk:"client_secret"`
+	Token        types.String `tfsdk:"token"`
 }
 
 func (p *latchkeyProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -64,6 +67,13 @@ func (p *latchkeyProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 				Sensitive:   true,
 				Description: "Service client secret. Falls back to LATCHKEY_CLIENT_SECRET.",
 			},
+			"token": schema.StringAttribute{
+				Optional:  true,
+				Sensitive: true,
+				Description: "A Latchkey access token to authenticate with instead of client_id and client_secret — for a caller " +
+					"that already signed in (a workload's short-lived token). Sent as is: the provider never renews it, so it must " +
+					"outlive the plan or apply. Exclusive with client_id and client_secret. Falls back to LATCHKEY_TOKEN.",
+			},
 		},
 	}
 }
@@ -84,7 +94,20 @@ func (p *latchkeyProvider) Configure(ctx context.Context, req provider.Configure
 	org := get(cfg.Org, "LATCHKEY_ORG")
 	id := get(cfg.ClientID, "LATCHKEY_CLIENT_ID")
 	secret := get(cfg.ClientSecret, "LATCHKEY_CLIENT_SECRET")
-	for name, v := range map[string]string{"issuer": issuer, "org": org, "client_id": id, "client_secret": secret} {
+	token := get(cfg.Token, "LATCHKEY_TOKEN")
+	required := map[string]string{"issuer": issuer, "org": org, "client_id": id, "client_secret": secret}
+	if token != "" {
+		// a token is the whole credential: no client signs in. Naming a
+		// client too is refused rather than guessing which one was meant —
+		// and the diagnostic names the attributes, never their values
+		if id != "" || secret != "" {
+			resp.Diagnostics.AddError("conflicting provider credentials",
+				"token is exclusive with client_id and client_secret: set token (or LATCHKEY_TOKEN) alone, "+
+					"or client_id and client_secret (or LATCHKEY_CLIENT_ID and LATCHKEY_CLIENT_SECRET) without a token.")
+		}
+		required = map[string]string{"issuer": issuer, "org": org}
+	}
+	for name, v := range required {
 		if v == "" {
 			resp.Diagnostics.AddError("missing provider configuration",
 				name+" is required (set it in the provider block or via LATCHKEY_"+envName(name)+")")
@@ -94,6 +117,9 @@ func (p *latchkeyProvider) Configure(ctx context.Context, req provider.Configure
 		return
 	}
 	client := latchkey.New(issuer, org, id, secret)
+	if token != "" {
+		client = latchkey.NewWithToken(issuer, org, token)
+	}
 	resp.ResourceData = client
 	resp.DataSourceData = client
 }
@@ -127,6 +153,8 @@ func (p *latchkeyProvider) Resources(context.Context) []func() resource.Resource
 		newTeamMemberResource,
 		newTenantGrantResource,
 		newWebhookResource,
+		newFederationTargetResource,
+		newFederationTargetGrantResource,
 		newGithubSigninResource,
 		newGithubAppResource,
 	}

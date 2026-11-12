@@ -43,3 +43,24 @@ func stringOrNull(v string, prior types.String) types.String {
 	}
 	return types.StringValue(v)
 }
+
+// stringSet unwraps a types.Set of strings; null/unknown sets come back
+// empty.
+func stringSet(ctx context.Context, s types.Set) []string {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	out := make([]string, 0, len(s.Elements()))
+	s.ElementsAs(ctx, &out, false)
+	return out
+}
+
+// stringSetValue is stringListValue for sets: an empty answer stays null
+// when the config never set the attribute.
+func stringSetValue(ctx context.Context, v []string, prior types.Set) types.Set {
+	if len(v) == 0 && prior.IsNull() {
+		return types.SetNull(types.StringType)
+	}
+	out, _ := types.SetValueFrom(ctx, types.StringType, v)
+	return out
+}

@@ -3,7 +3,8 @@
 Manage a [Latchkey](https://latchkey.id) organization's configuration as
 code: OIDC clients, membership grants, custom auth domains, hosted-page
 branding, mail templates, tenants, role definitions, teams, tenant
-grants and API keys — everything the org API exposes.
+grants, API keys and federation targets — everything the org API
+exposes.
 
 The provider authenticates as the org's **own confidential service
 client** (OAuth2 `client_credentials`), so Terraform can do exactly what
@@ -151,7 +152,38 @@ resource "latchkey_webhook" "product" {
 ```
 
 Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
-`LATCHKEY_ORG`, `LATCHKEY_CLIENT_ID`, `LATCHKEY_CLIENT_SECRET`.
+`LATCHKEY_ORG`, `LATCHKEY_CLIENT_ID`, `LATCHKEY_CLIENT_SECRET`,
+`LATCHKEY_TOKEN`.
+
+### Authenticating with a token
+
+A caller that has already signed in to Latchkey — a workload holding a
+short-lived access token, with no client secret to give — hands the
+provider that token instead of a client:
+
+```hcl
+provider "latchkey" {
+  issuer = "https://auth.latchkey.id"
+  org    = "acme"
+  token  = var.latchkey_token # sensitive; or LATCHKEY_TOKEN
+}
+```
+
+- With a token, `client_id` and `client_secret` are not required, and
+  the provider never calls `/oauth/token`: the token is sent as it is.
+- **The provider does not renew the token.** It must stay valid until
+  the plan or apply finishes; one that expires midway fails the calls
+  after it, and the run must be started again with a fresh token.
+- `token` is exclusive with `client_id` and `client_secret`, from the
+  provider block or the environment. Setting both is a configuration
+  error — the provider does not guess which credential was meant.
+- The token can do what its holder can: Latchkey authorizes each call
+  as it would for that caller anywhere else.
+- `token` is sensitive, and the provider never puts it in a
+  diagnostic, a log line or an error.
+
+With no token, nothing changes: `client_id` and `client_secret` are
+required and the provider signs in with them.
 
 ## Resources
 
@@ -171,6 +203,8 @@ Every provider attribute falls back to the environment: `LATCHKEY_ISSUER`,
 | `latchkey_team_member` | One identity's place on a hand-managed team (by email; the identity is ensured) | Removes the member |
 | `latchkey_tenant_grant` | One identity's grant on a `{org}/{tenant}` namespace: level + registry roles. Org-level roles deliberately stay behind the owner-gated invite flow | Revokes the grant |
 | `latchkey_webhook` | Signed webhook endpoint: `url` (keyed — a change replaces), sensitive `secret`, optional `events` filter (`invitation.*`, `membership.set`, …). Runtime deliveries stay in the console | Disables the endpoint |
+| `latchkey_federation_target` | A tenant's federation target — the trust at a cloud that Latchkey's short-lived subject tokens are traded on: `cloud` `gcp` (workload identity provider path, service account, scopes), `aws` (role, region, session policy, duration), `azure` (directory, client, scope, hosts) or `oidc` (token endpoint or a direct target, hosts). Holds no secret; everything but the grants updates in place. Reads back `target_ref`, `audience` and, for GCP, `principal_set`, `principal` and `attribute_condition`, so the cloud's side of the trust is declared in the same config. The org must hold the federation feature. Import by `org/tenant/name` | **Deletes — final: the name stays taken**, so a stale ref never names a new trust |
+| `latchkey_federation_target_grant` | One product's grant on a target: `purposes` (at least one), `kinds` (the job kinds whose sessions may mint; `*` is all; none is the product's own workload only) and `environments` (none is any). Replaced in place. Import by `org/tenant/target/product` | Revokes the grant; the target stays |
 
 Data source: `latchkey_org` — the org's identity and configured-ness
 (secrets never appear in any API response).
@@ -241,6 +275,123 @@ credentials must be the owner's or platform staff's — the estate's
 plan time, because a rebind is a platform staff act, never a
 replacement. `new_tenant` is read only at creation. Import reads the
 binding into `tenant_key`.
+
+## Federation: one apply wires Latchkey and the cloud
+
+A federation target is a tenant's trust at a cloud. Latchkey holds no
+cloud key: it signs a five-minute subject token for a product that
+holds a grant on the target, and the cloud trades it for its own
+credential. Both halves of that trust — Latchkey's target and grant,
+and the cloud's provider and IAM binding — fit in one configuration,
+because the target reads back what the cloud's side must name:
+
+```hcl
+data "google_project" "this" {}
+
+locals {
+  # the provider's resource name: a path, written before the provider exists
+  workload_identity_provider = "projects/${data.google_project.this.number}/locations/global/workloadIdentityPools/latchkey/providers/latchkey"
+}
+
+resource "google_service_account" "deployer" {
+  account_id = "latchkey-deployer"
+}
+
+resource "latchkey_federation_target" "deployer" {
+  tenant = "shop"
+  name   = "gcp-deployer"
+  cloud  = "gcp"
+
+  gcp = {
+    workload_identity_provider = local.workload_identity_provider
+    service_account            = google_service_account.deployer.email
+  }
+}
+
+resource "latchkey_federation_target_grant" "runsheet" {
+  tenant       = latchkey_federation_target.deployer.tenant
+  target       = latchkey_federation_target.deployer.name
+  product      = "runsheet"
+  purposes     = ["deploy"]
+  environments = ["production"]
+}
+
+resource "google_iam_workload_identity_pool" "latchkey" {
+  workload_identity_pool_id = "latchkey"
+}
+
+resource "google_iam_workload_identity_pool_provider" "latchkey" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.latchkey.workload_identity_pool_id
+  workload_identity_pool_provider_id = "latchkey"
+
+  attribute_mapping = {
+    "google.subject"    = "assertion.sub"
+    "attribute.target"  = "assertion.target"
+    "attribute.tenant"  = "assertion.tenant"
+    "attribute.product" = "assertion.product"
+  }
+
+  # assertion.tenant == "<the tenant's ref>" && assertion.target == "<target_ref>"
+  attribute_condition = latchkey_federation_target.deployer.attribute_condition
+
+  oidc {
+    issuer_uri = "https://auth.latchkey.id"
+  }
+}
+
+resource "google_service_account_iam_member" "deployer" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = latchkey_federation_target.deployer.principal_set
+}
+```
+
+The complete file, with providers and variables, is
+[`examples/federation-gcp/main.tf`](../examples/federation-gcp/main.tf).
+
+**There is no chicken-and-egg.** The target does not reference the GCP
+provider resource; its `workload_identity_provider` is a path string,
+built from the project's number and two ids you choose, so it can be
+written before the provider exists. The dependency runs one way: the
+GCP provider's condition and the IAM member depend on the target
+(`attribute_condition`, `target_ref`, `principal_set`), and the target
+depends on nothing at GCP but the service account's email. Do not set
+`workload_identity_provider` from
+`google_iam_workload_identity_pool_provider.latchkey.name` — that is
+the one spelling that makes a cycle. Until the apply finishes, the
+target simply names a provider GCP does not have yet, and mints for it
+are refused by GCP, not by Latchkey.
+
+Things to know:
+
+- `attribute_condition` is Latchkey's recommendation for a provider
+  that admits this one target. The `tenant` claim is the tenant's ref,
+  which is not always its slug, so take the condition from the target
+  rather than spelling the tenant. To admit several targets through
+  one provider, write your own condition from each target's
+  `target_ref`.
+- `principal` is a pattern, not a member: it ends
+  `fed:<target_ref>:<product>:<kind|workload>` with the last two parts
+  left as placeholders. `principal_set` is ready to use.
+- `audience` defaults to the cloud's own (for GCP the provider's
+  canonical name, which a provider with no allowed audiences accepts).
+  Set it only if the provider lists `allowed_audiences`.
+- `org` defaults to the provider's org on both resources.
+- Deleting a target is final and its name stays taken, and Latchkey
+  never changes a target's `cloud`. A plan that changes `cloud` under
+  the same name is therefore refused with a request for a new `name`,
+  rather than destroying a target that could not be set again.
+- The provider's credentials must be the org's own service client with
+  no `product` and no scope (or the owner's, or staff's). A product's
+  client never manages a federation target: Latchkey answers it 403.
+- All four clouds are implemented. For `aws`, `azure` and `oidc` the
+  provider reads back `target_ref` and `audience` only: the trust
+  values for those clouds (the AWS trust policy condition, the Azure
+  federated credential's subject) are not exposed as attributes, so
+  build them from `target_ref` — a subject is
+  `fed:<target_ref>:<product>:<kind|workload>`.
+- `POST …/federation-targets/{name}/verify` (one live exchange at the
+  cloud) is an action, not desired state, and is not modelled.
 
 ## What stays in the console
 
